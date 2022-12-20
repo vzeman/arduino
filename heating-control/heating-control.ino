@@ -154,7 +154,7 @@ void printWiFiStatus() {
 }
 
 int initFromEEPROM(int address, int defaultValue, int minValue, int maxValue) {
-    value = EEPROM.read(word_address);
+    int value = EEPROM.read(address);
     if (value < minValue || value > maxValue) {
         return defaultValue;
     }
@@ -321,7 +321,7 @@ void loop(void) {
     Serial.println("");
 
     if (currentTime % 3600 == 0) {
-        storeValuesToEEPROM()
+        storeValuesToEEPROM();
     }
     currentTime++;
 
@@ -451,17 +451,21 @@ void storeValuesToEEPROM(void) {
     EEPROM.write(ADDRESS_tempWaterRequiredDown, tempWaterRequiredDown);
 }
 
-void printControlValue(WiFiClient client, char[] name, float value, char[] urlPrefix) {
+void printControlValue(WiFiClient client, char name[], float value, char urlPrefix[]) {
     client.print("<tr><td>");
     client.print(name);
     client.print("</td><td>");
-    client.print("<a href=\"/" + urlPrefix + "/UP\">UP</a>");
+    client.print("<a href=\"/");
+    client.print(urlPrefix);
+    client.print("/UP\">UP</a>");
     client.print(value);
-    client.print("<a href=\"/" + urlPrefix + "/DOWN\">Down</a>");
+    client.print("<a href=\"/");
+    client.print(urlPrefix);
+    client.print("/DOWN\">Down</a>");
     client.print("</td></tr>");
 }
 
-void printStatusValue(WiFiClient client, char[] name, float value) {
+void printStatusValue(WiFiClient client, char name[], float value) {
     client.print("<tr><td>");
     client.print(name);
     client.print("</td><td>");
