@@ -1,8 +1,9 @@
-//TODO - dorobit safety switch
+//TODO - safety switch
 //TODO UI
-//TODO riadenie teploty aj na zaklade teploty v dome
-
-
+//TODO save into persistent storage last required temperatures
+//TODO add option to switch off Heating
+//TODO add option to switch off water
+//TODO add option to control water temperature
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -53,7 +54,7 @@ const int VYP = HIGH;  //relatka maju opacne spinanie, preto VYP je high voltage
 //********** TEMPERATURES *****************
 const int TmaxIN = 45;                 //max teplota na vstupe podlahovky
 const int TmaxOUT = 35;                //max teplota na vystupe podlahovky
-int ThomeRequired = 23;          //pozadovana teplota v dome
+int ThomeRequired = 23;                //pozadovana teplota v dome
 int TrequiredOUT = ThomeRequired + 3;  //inicializacia vystupnej teploty podlahovky
 
 const int tempWaterRequiredHigh = 57;  //pozadovana horna teplota vody
@@ -79,12 +80,10 @@ const int delayBetweenHomeChanges = 600;
 #include <WiFiNINA.h>
 //#include "arduino_secrets.h"
 ///////please enter your sensitive data in the Secret tab/arduino_secrets.h
-char ssid[] = "xxxxxxxx";    // your network SSID (name)
-char pass[] = "xxxxxxxx";  // your network password (use for WPA, or use as key for WEP)
-int keyIndex = 0;          // your network key Index number (needed only for WEP)
+char ssid[] = "Heating0001";  // your network SSID (name)
+char pass[] = "heatison";     // your network password (use for WPA, or use as key for WEP)
+int keyIndex = 0;             // your network key Index number (needed only for WEP)
 WiFiServer server(80);
-
-int wifiConnected = 0;
 int status = WL_IDLE_STATUS;
 
 
@@ -163,6 +162,7 @@ void switchOffStepMotors(void) {
 }
 
 void printWiFiStatus() {
+  // print the SSID of the network you're attached to:
   Serial.print("SSID: ");
   Serial.println(WiFi.SSID());
 
@@ -191,29 +191,42 @@ void setup(void) {
   switchOffStepMotors();
 
 
-
+  Serial.println("Access Point Web Server");
+  // check for the WiFi module:
   if (WiFi.status() == WL_NO_MODULE) {
     Serial.println("Communication with WiFi module failed!");
-  } else {
-    // by default the local IP address of will be 192.168.4.1
-    // you can override it with the following:
-    // WiFi.config(IPAddress(10, 0, 0, 1));
-    Serial.print("Creating access point named: ");
-    Serial.println(ssid);
-    status = WiFi.beginAP(ssid, pass);
-
-    if (status != WL_AP_LISTENING) {
-      Serial.println("Creating access point failed");
-    } else {
-      // wait 10 seconds for connection:
-      delay(10000);
-      // start the web server on port 80
-      server.begin();
-      // you're connected now, so print out the status
-      printWiFiStatus();
-      wifiConnected = 1;
-    }
+    // don't continue
+    while (true)
+      ;
   }
+
+
+  String fv = WiFi.firmwareVersion();
+  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
+    Serial.println("Please upgrade the firmware");
+  }
+
+  // print the network name (SSID);
+  Serial.print("Creating access point named: ");
+  Serial.println(ssid);
+
+  // Create open network. Change this line if you want to create an WEP network:
+  status = WiFi.beginAP(ssid, pass);
+  if (status != WL_AP_LISTENING) {
+    Serial.println("Creating access point failed");
+    // don't continue
+    while (true)
+      ;
+  }
+
+  // wait 10 seconds for connection:
+  delay(10000);
+
+  // start the web server on port 80
+  server.begin();
+
+  // you're connected now, so print out the status
+  printWiFiStatus();
 }
 
 void loop(void) {
@@ -318,74 +331,73 @@ void loop(void) {
 
   // compare the previous status to the current status
 
+  // compare the previous status to the current status
   if (status != WiFi.status()) {
     // it has changed update the variable
     status = WiFi.status();
+
     if (status == WL_AP_CONNECTED) {
       // a device has connected to the AP
       Serial.println("Device connected to AP");
-      wifiConnected = 1;
     } else {
       // a device has disconnected from the AP, and we are back in listening mode
       Serial.println("Device disconnected from AP");
-      wifiConnected = 0;
     }
   }
 
-  if (wifiConnected) {
-    WiFiClient client = server.available();  // listen for incoming clients
-    if (client) {                            // if you get a client,
-      Serial.println("new client");          // print a message out the serial port
-      String currentLine = "";               // make a String to hold incoming data from the client
-      while (client.connected()) {           // loop while the client's connected
-        if (client.available()) {            // if there's bytes to read from the client,
-          char c = client.read();            // read a byte, then
-          Serial.write(c);                   // print it out the serial monitor
-          if (c == '\n') {                   // if the byte is a newline character
-            // if the current line is blank, you got two newline characters in a row.
-            // that's the end of the client HTTP request, so send a response:
-            if (currentLine.length() == 0) {
-              // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-              // and a content-type so the client knows what's coming, then a blank line:
-              client.println("HTTP/1.1 200 OK");
-              client.println("Content-type:text/html");
-              client.println();
-              // the content of the HTTP response follows the header:
-              client.print("Home Temperature <a href=\"/H\">UP</a><br><br><a href=\"/L\">Down</a><br><br><a href=\"/\">Refresh</a>");
-              client.print("<br><br><br>");
-              client.print("<br>Home required temp: ");
-              client.print(ThomeRequired);
-              client.print("<br>Home current temp: ");
-              client.print(Thome);
-              client.print("<br>Podlahovka IN temp: ");
-              client.print(Tin);
-              client.print("<br>Podlahovka OUT temp: ");
-              client.print(Tout);              // The HTTP response ends with another blank line:
-              client.print("<br>Voda TOP temp: ");
-              client.print(TwaterTop);              // The HTTP response ends with another blank line:
-              client.print("<br>Voda BOTTOM temp: ");
-              client.print(TwaterBottom);              // The HTTP response ends with another blank line:
-              client.println();
-              // break out of the while loop:
-              break;
-            } else {  // if you got a newline, then clear currentLine:
-              currentLine = "";
-            }
-          } else if (c != '\r') {  // if you got anything else but a carriage return character,
-            currentLine += c;      // add it to the end of the currentLine
+
+  WiFiClient client = server.available();  // listen for incoming clients
+  if (client) {                            // if you get a client,
+    Serial.println("new client");          // print a message out the serial port
+    String currentLine = "";               // make a String to hold incoming data from the client
+    while (client.connected()) {           // loop while the client's connected
+      if (client.available()) {            // if there's bytes to read from the client,
+        char c = client.read();            // read a byte, then
+        Serial.write(c);                   // print it out the serial monitor
+        if (c == '\n') {                   // if the byte is a newline character
+          // if the current line is blank, you got two newline characters in a row.
+          // that's the end of the client HTTP request, so send a response:
+          if (currentLine.length() == 0) {
+            // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
+            // and a content-type so the client knows what's coming, then a blank line:
+            client.println("HTTP/1.1 200 OK");
+            client.println("Content-type:text/html");
+            client.println();
+            // the content of the HTTP response follows the header:
+            client.print("Home Temperature <a href=\"/H\">UP</a><br><br><a href=\"/L\">Down</a><br><br><a href=\"/\">Refresh</a>");
+            client.print("<br><br><br>");
+            client.print("<br>Home required temp: ");
+            client.print(ThomeRequired);
+            client.print("<br>Home current temp: ");
+            client.print(Thome);
+            client.print("<br>Podlahovka IN temp: ");
+            client.print(Tin);
+            client.print("<br>Podlahovka OUT temp: ");
+            client.print(Tout);  // The HTTP response ends with another blank line:
+            client.print("<br>Voda TOP temp: ");
+            client.print(TwaterTop);  // The HTTP response ends with another blank line:
+            client.print("<br>Voda BOTTOM temp: ");
+            client.print(TwaterBottom);  // The HTTP response ends with another blank line:
+            client.println();
+            // break out of the while loop:
+            break;
+          } else {  // if you got a newline, then clear currentLine:
+            currentLine = "";
           }
-          // Check to see if the client request was "GET /H" or "GET /L":
-          if (currentLine.endsWith("GET /H")) {
-            ThomeRequired += 1;
-          }
-          if (currentLine.endsWith("GET /L")) {
-            ThomeRequired -= 1;
-          }
+        } else if (c != '\r') {  // if you got anything else but a carriage return character,
+          currentLine += c;      // add it to the end of the currentLine
+        }
+        // Check to see if the client request was "GET /H" or "GET /L":
+        if (currentLine.endsWith("GET /H")) {
+          ThomeRequired += 1;
+        }
+        if (currentLine.endsWith("GET /L")) {
+          ThomeRequired -= 1;
         }
       }
-      // close the connection:
-      client.stop();
-      Serial.println("client disconnected");
     }
+    // close the connection:
+    client.stop();
+    Serial.println("client disconnected");
   }
 }
