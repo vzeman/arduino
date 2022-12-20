@@ -53,6 +53,7 @@ const int VYP = HIGH;  //relatka maju opacne spinanie, preto VYP je high voltage
 int TmaxIN = 45;                 //max teplota na vstupe podlahovky
 int TmaxOUT = 35;                //max teplota na vystupe podlahovky
 int ThomeRequired = 23;                //pozadovana teplota v dome
+float prevThome = 0;
 int TrequiredOUT = ThomeRequired + 3;  //inicializacia vystupnej teploty podlahovky
 int tempWaterRequiredHigh = 57;  //pozadovana horna teplota vody
 int tempWaterRequiredDown = 40;  //pozadovana dolna teplota vody
@@ -66,7 +67,7 @@ const int stepDown = 1000;  //cas v milisekundach kolko posuvame krokove motory 
 int currentTime = 0;
 const int delayBetweenChanges = 30;
 const int delayBetweenWaterChanges = 5;
-const int delayBetweenHomeChanges = 600;
+const int delayBetweenHomeChanges = 1800;
 
 
 //*********************** WIFI *************************
@@ -173,6 +174,7 @@ void setup(void) {
     TmaxIN = initFromEEPROM(ADDRESS_TmaxIN, 45, 30, 49);
     TmaxOUT = initFromEEPROM(ADDRESS_TmaxOUT, 35, 15, 38);
     ThomeRequired = initFromEEPROM(ADDRESS_ThomeRequired, 23, 10, 26);                //pozadovana teplota v dome
+    prevThome = getAnalogTemperature(THERMISTORPIN);
     TrequiredOUT = initFromEEPROM(ADDRESS_TrequiredOUT, ThomeRequired + 3, 10,
                                   TmaxOUT);  //inicializacia vystupnej teploty podlahovky
     tempWaterRequiredHigh = initFromEEPROM(ADDRESS_tempWaterRequiredHigh, 57, 10, 70);  //pozadovana horna teplota vody
@@ -277,19 +279,16 @@ void loop(void) {
     }
 
     if (currentTime % delayBetweenHomeChanges == 0) {
-        if (Thome > ThomeRequired) {
-            if (TrequiredOUT > ThomeRequired) {
+        if (Thome > ThomeRequired && TrequiredOUT > ThomeRequired && prevThome <= Thome) {
                 TrequiredOUT -= 1;
                 Serial.print("!!!!!!!!!!   Decrease out temperature to ");
                 Serial.println(TrequiredOUT);
-            }
-        } else if (Thome < ThomeRequired - 0.5) {
-            if (TmaxOUT < TrequiredOUT) {
+        } else if (Thome < (ThomeRequired - 0.5) && TmaxOUT < TrequiredOUT && prevThome >= Thome) {
                 TrequiredOUT += 1;
                 Serial.print("!!!!!!!!!!   Increase out temperature to ");
                 Serial.println(TrequiredOUT);
-            }
         }
+        prevThome = Thome;
     }
     Serial.print("Current required out temperature is ");
     Serial.println(TrequiredOUT);
@@ -363,7 +362,7 @@ void loop(void) {
                         client.println();
 
 
-                        client.print("<table>");
+                        client.print("<table style='border: 1px solid black;'>");
                         printStatusValue(client, "Current Home Temperature", Thome);
                         printControlValue(client, "Requested Home Temperature", ThomeRequired, "HomeReq");
 
@@ -452,23 +451,23 @@ void storeValuesToEEPROM(void) {
 }
 
 void printControlValue(WiFiClient client, char name[], float value, char urlPrefix[]) {
-    client.print("<tr><td>");
+    client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
     client.print(name);
-    client.print("</td><td>");
-    client.print("<a href=\"/");
+    client.print(" </td><td>");
+    client.print(" <a href=\"/");
     client.print(urlPrefix);
-    client.print("/UP\">UP</a>");
+    client.print("/UP\"> UP </a> ");
     client.print(value);
-    client.print("<a href=\"/");
+    client.print(" <a href=\"/");
     client.print(urlPrefix);
-    client.print("/DOWN\">Down</a>");
+    client.print("/DOWN\"> Down </a> ");
     client.print("</td></tr>");
 }
 
 void printStatusValue(WiFiClient client, char name[], float value) {
-    client.print("<tr><td>");
+    client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
     client.print(name);
-    client.print("</td><td>");
+    client.print(" </td><td> ");
     client.print(value);
-    client.print("</td></tr>");
+    client.print(" </td></tr>");
 }
