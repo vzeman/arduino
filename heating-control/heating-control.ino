@@ -81,8 +81,8 @@ const int delayBetweenHomeChanges = 3600;
 #include <SPI.h>
 #include <WiFiNINA.h>
 
-char ssid[] = "Heating0001";  // your network SSID (name)
-char pass[] = "heatison";     // your network password (use for WPA, or use as key for WEP)
+char ssid[] = "VZ4";  // your network SSID (name)
+char pass[] = "Vikina01";     // your network password (use for WPA, or use as key for WEP)
 WiFiServer server(80);
 int status = WL_IDLE_STATUS;
 
@@ -197,33 +197,12 @@ void setup(void) {
   switchOffStepMotors();
 
 
-  Serial.println("Access Point Web Server");
-  // check for the WiFi module:
-  if (WiFi.status() == WL_NO_MODULE) {
-    Serial.println("Communication with WiFi module failed!");
-    // don't continue
-    while (true)
-      ;
-  }
-
-
-  String fv = WiFi.firmwareVersion();
-  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
-    Serial.println("Please upgrade the firmware");
-  }
-
-  // print the network name (SSID);
-  Serial.print("Creating access point named: ");
-  Serial.println(ssid);
-
   // Create open network. Change this line if you want to create an WEP network:
-  status = WiFi.beginAP(ssid, pass);
-  if (status != WL_AP_LISTENING) {
-    Serial.println("Creating access point failed");
-    // don't continue
-    while (true)
-      ;
+  while ( status != WL_CONNECTED) {
+    status = WiFi.begin(ssid, pass);
+    delay(5000);
   }
+
 
   // wait 10 seconds for connection:
   delay(10000);
@@ -365,6 +344,8 @@ void loop(void) {
             client.println("Content-type:text/html");
             client.println();
 
+            client.print("<link href='https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-alpha.6/css/bootstrap.min.css' rel='stylesheet'/>");
+            client.print(" <a class='btn btn-primary' href=\"/\"> REFRESH </a> ");
 
             client.print("<table style='border: 1px solid black;'>");
             printStatusValue(client, "Current Home Temperature", Thome);
@@ -463,11 +444,11 @@ void printControlValue(WiFiClient client, char name[], float value, char urlPref
   client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
   client.print(name);
   client.print(" </td><td>");
-  client.print(" <a href=\"/");
+  client.print(" <a class='btn btn-primary' href=\"/");
   client.print(urlPrefix);
   client.print("/UP\"> UP </a> ");
   client.print(value);
-  client.print(" <a href=\"/");
+  client.print(" <a class='btn btn-primary' href=\"/");
   client.print(urlPrefix);
   client.print("/DOWN\"> Down </a> ");
   client.print("</td></tr>");
