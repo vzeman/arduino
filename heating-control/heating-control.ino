@@ -5,6 +5,8 @@
 #include <DallasTemperature.h>
 #include <EEPROM.h>
 
+void(* resetFunc) (void) = 0;
+
 //******** Temperature sensors *****************************
 #define ONE_WIRE_BUS_Water_Top 6     //modra kratka
 #define ONE_WIRE_BUS_Water_Bottom 7  //modra dlha
@@ -52,6 +54,9 @@ const int pin_step_motor_water_down = 11;    // Define SSR channel 2 pin
 const int pin_step_motor_heating_up = 12;    // Define SSR channel 3 pin
 const int pin_step_motor_heating_down = 13;  // Define SSR channel 4 pin
 
+//************ SOLID STATE RELAYS - CERPADLO ***********
+//TODO const int pin_water_pump = 9;
+
 const int ZAP = LOW;   //relatka maju opacne spinanie, preto ZAP je low voltage
 const int VYP = HIGH;  //relatka maju opacne spinanie, preto VYP je high voltage
 
@@ -81,8 +86,9 @@ const int delayBetweenHomeChanges = 3600;
 #include <SPI.h>
 #include <WiFiNINA.h>
 
-char ssid[] = "VZ4";  // your network SSID (name)
-char pass[] = "Vikina01";     // your network password (use for WPA, or use as key for WEP)
+#define WIFI_SSID "VZ4"
+#define WIFI_PASSWORD "Vikina01"
+
 WiFiServer server(80);
 int status = WL_IDLE_STATUS;
 
@@ -169,6 +175,49 @@ int initFromEEPROM(int address, int defaultValue, int minValue, int maxValue) {
   return value;
 }
 
+void storeValuesToEEPROM(void) {
+  saveEEPROMValue(ADDRESS_ThomeRequired, ThomeRequired);
+  saveEEPROMValue(ADDRESS_TmaxIN, TmaxIN);
+  saveEEPROMValue(ADDRESS_TrequiredOUT, TrequiredOUT);
+  saveEEPROMValue(ADDRESS_TmaxOUT, TmaxOUT);
+  saveEEPROMValue(ADDRESS_tempWaterRequiredHigh, tempWaterRequiredHigh);
+  saveEEPROMValue(ADDRESS_tempWaterRequiredDown, tempWaterRequiredDown);
+}
+
+void saveEEPROMValue(int address, int value) {
+  if (value != EEPROM.read(address)) {
+    EEPROM.write(address, value);
+  }
+}
+
+void printControlValue(WiFiClient client, char name[], float value, char urlPrefix[]) {
+  client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
+  client.print(name);
+  client.print(" </td><td>");
+  client.print(" <a class='btn btn-primary' href=\"/");
+  client.print(urlPrefix);
+  client.print("/UP\"> UP </a> ");
+  client.print(value);
+  client.print(" <a class='btn btn-primary' href=\"/");
+  client.print(urlPrefix);
+  client.print("/DOWN\"> Down </a> ");
+  client.print("</td></tr>");
+}
+
+void printStatusValue(WiFiClient client, char name[], float value) {
+  client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
+  client.print(name);
+  client.print(" </td><td> ");
+  client.print(value);
+  client.print(" </td></tr>");
+}
+
+float Thome;
+float Tin;
+float Tout;
+float TwaterTop;
+float TwaterBottom;
+
 
 void setup(void) {
   //init values after restart from EEPROM or default
@@ -185,6 +234,8 @@ void setup(void) {
 
 
   Serial.begin(9600);
+    Serial.println("Booting");
+
   sensorWaterTop.begin();
   sensorWaterBottom.begin();
   sensorHeatingIn.begin();
@@ -198,14 +249,13 @@ void setup(void) {
 
 
   // Create open network. Change this line if you want to create an WEP network:
-  while ( status != WL_CONNECTED) {
-    status = WiFi.begin(ssid, pass);
+  while (status != WL_CONNECTED) {
+    status = WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     delay(5000);
   }
 
+  Serial.println("Wifi connected");
 
-  // wait 10 seconds for connection:
-  delay(10000);
 
   // start the web server on port 80
   server.begin();
@@ -214,17 +264,21 @@ void setup(void) {
   printWiFiStatus();
 }
 
+
+
 void loop(void) {
+  
+  Serial.println("Loop start");
   sensorWaterTop.requestTemperatures();
   sensorWaterBottom.requestTemperatures();
   sensorHeatingIn.requestTemperatures();
   sensorHeatingOut.requestTemperatures();
   delay(1000);
-  float Thome = getAnalogTemperature(THERMISTORPIN);
-  float Tin = sensorHeatingIn.getTempCByIndex(0);
-  float Tout = sensorHeatingOut.getTempCByIndex(0);
-  float TwaterTop = sensorWaterTop.getTempCByIndex(0);
-  float TwaterBottom = sensorWaterBottom.getTempCByIndex(0);
+  Thome = getAnalogTemperature(THERMISTORPIN);
+  Tin = sensorHeatingIn.getTempCByIndex(0);
+  Tout = sensorHeatingOut.getTempCByIndex(0);
+  TwaterTop = sensorWaterTop.getTempCByIndex(0);
+  TwaterBottom = sensorWaterBottom.getTempCByIndex(0);
   Serial.println("- HOME ---------------------");
   Serial.println(Thome);
   Serial.println("- HEATING ---------------------");
@@ -304,6 +358,9 @@ void loop(void) {
 
   if (currentTime % 3600 == 0) {
     storeValuesToEEPROM();
+  }
+  if (currentTime == 86400) {
+    resetFunc();
   }
   currentTime++;
 
@@ -423,41 +480,4 @@ void loop(void) {
     client.stop();
     Serial.println("client disconnected");
   }
-}
-
-void storeValuesToEEPROM(void) {
-  saveEEPROMValue(ADDRESS_ThomeRequired, ThomeRequired);
-  saveEEPROMValue(ADDRESS_TmaxIN, TmaxIN);
-  saveEEPROMValue(ADDRESS_TrequiredOUT, TrequiredOUT);
-  saveEEPROMValue(ADDRESS_TmaxOUT, TmaxOUT);
-  saveEEPROMValue(ADDRESS_tempWaterRequiredHigh, tempWaterRequiredHigh);
-  saveEEPROMValue(ADDRESS_tempWaterRequiredDown, tempWaterRequiredDown);
-}
-
-void saveEEPROMValue(int address, int value) {
-  if (value != EEPROM.read(address)) {
-    EEPROM.write(address, value);
-  }
-}
-
-void printControlValue(WiFiClient client, char name[], float value, char urlPrefix[]) {
-  client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
-  client.print(name);
-  client.print(" </td><td>");
-  client.print(" <a class='btn btn-primary' href=\"/");
-  client.print(urlPrefix);
-  client.print("/UP\"> UP </a> ");
-  client.print(value);
-  client.print(" <a class='btn btn-primary' href=\"/");
-  client.print(urlPrefix);
-  client.print("/DOWN\"> Down </a> ");
-  client.print("</td></tr>");
-}
-
-void printStatusValue(WiFiClient client, char name[], float value) {
-  client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
-  client.print(name);
-  client.print(" </td><td> ");
-  client.print(value);
-  client.print(" </td></tr>");
 }
