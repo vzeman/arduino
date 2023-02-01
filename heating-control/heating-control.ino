@@ -1,11 +1,12 @@
-//TODO add option to switch off Heating
-//TODO add option to switch off water
+#define WIFI_SSID "VZ4"
+#define WIFI_PASSWORD "*******"
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <EEPROM.h>
+#include <TimeLib.h>
 
-void(* resetFunc) (void) = 0;
+void (*resetFunc)(void) = 0;
 
 //******** Temperature sensors *****************************
 #define ONE_WIRE_BUS_Water_Top 6     //modra kratka
@@ -86,8 +87,6 @@ const int delayBetweenHomeChanges = 3600;
 #include <SPI.h>
 #include <WiFiNINA.h>
 
-#define WIFI_SSID "VZ4"
-#define WIFI_PASSWORD "Vikina01"
 
 WiFiServer server(80);
 int status = WL_IDLE_STATUS;
@@ -212,6 +211,14 @@ void printStatusValue(WiFiClient client, char name[], float value) {
   client.print(" </td></tr>");
 }
 
+void printStatusString(WiFiClient client, char name[], arduino::StringSumHelper value) {
+  client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
+  client.print(name);
+  client.print(" </td><td> ");
+  client.print(value);
+  client.print(" </td></tr>");
+}
+
 float Thome;
 float Tin;
 float Tout;
@@ -234,7 +241,7 @@ void setup(void) {
 
 
   Serial.begin(9600);
-    Serial.println("Booting");
+  Serial.println("Booting");
 
   sensorWaterTop.begin();
   sensorWaterBottom.begin();
@@ -262,13 +269,22 @@ void setup(void) {
 
   // you're connected now, so print out the status
   printWiFiStatus();
+
+  if (WiFi.getTime() != 0) {
+    setTime(WiFi.getTime());
+  }
 }
 
 
 
 void loop(void) {
-  
+
   Serial.println("Loop start");
+  if (WiFi.getTime() != 0) {
+    setTime(WiFi.getTime());
+  }
+  Serial.println(String(hour()) + ":" + String(minute()) + ":" + String(second()));
+
   sensorWaterTop.requestTemperatures();
   sensorWaterBottom.requestTemperatures();
   sensorHeatingIn.requestTemperatures();
@@ -318,7 +334,7 @@ void loop(void) {
     if (Thome > ThomeRequired && TrequiredOUT > ThomeRequired && prevThome <= Thome) {
       TrequiredOUT -= 1;
       Serial.print("!!!!!!!!!!   Decreasing out temperature: ");
-    } else if (Thome < (ThomeRequired - 0.2) && TmaxOUT < TrequiredOUT && prevThome >= Thome) {
+    } else if (TmaxOUT < TrequiredOUT && ((Thome < (ThomeRequired - 0.2) && prevThome >= Thome) || Thome < (ThomeRequired - 0.5))) {
       TrequiredOUT += 1;
       Serial.print("!!!!!!!!!!   Increasing out temperature: ");
     } else {
@@ -336,6 +352,17 @@ void loop(void) {
   Serial.println(TwaterTop);
   Serial.print("Bottom: ");
   Serial.println(TwaterBottom);
+
+
+  //fix errors in sensor data - This is critical error !!!
+  if (TwaterBottom < 0 && TwaterTop > 0) {
+    Serial.print("CRITICAL ERROR: Bottom Water Temperature sensor indicates negative value!!!");
+    TwaterBottom = TwaterTop;
+  }
+  if (TwaterTop < 0 && TwaterBottom > 0) {
+    Serial.print("CRITICAL ERROR: Top Water Temperature sensor indicates negative value!!!");
+    TwaterTop = TwaterBottom;
+  }
 
   if (currentTime % delayBetweenWaterChanges == 0) {
     if (TwaterTop > tempWaterRequiredHigh || TwaterBottom > tempWaterRequiredDown) {
@@ -402,7 +429,7 @@ void loop(void) {
             client.println();
 
             client.print("<link href='https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-alpha.6/css/bootstrap.min.css' rel='stylesheet'/>");
-            client.print(" <a class='btn btn-primary' href=\"/\"> REFRESH </a> ");
+            client.print("</br></br><a class='btn btn-primary' href=\"/\"> REFRESH </a> ");
 
             client.print("<table style='border: 1px solid black;'>");
             printStatusValue(client, "Current Home Temperature", Thome);
@@ -419,8 +446,11 @@ void loop(void) {
             printControlValue(client, "Required Water TOP", tempWaterRequiredHigh, "WaterReqTop");
             printStatusValue(client, "Current Water Bottom", TwaterBottom);
             printControlValue(client, "Required Water Bottom", tempWaterRequiredDown, "WaterReqBottom");
+            printStatusValue(client, "Current Loop Nr", currentTime);
+            printStatusString(client, "Current Time", String(hour()) + ":" + String(minute()) + ":" + String(second()));
             client.print("</table>");
-
+            client.print("</br></br><a class='btn btn-primary' href=\"/reboot\"> REBOOT </a> ");
+            
             client.println();
             // break out of the while loop:
             break;
@@ -473,6 +503,11 @@ void loop(void) {
         } else if (currentLine.endsWith("GET /WaterReqBottom/DOWN")) {
           tempWaterRequiredDown -= 1;
           storeValuesToEEPROM();
+        } else if (currentLine.endsWith("GET /reboot")) {
+          Serial.println("rebooting...");
+          storeValuesToEEPROM();
+          client.stop();
+          resetFunc();
         }
       }
     }
