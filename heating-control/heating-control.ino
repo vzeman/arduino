@@ -229,8 +229,10 @@ void printStatusString(WiFiClient client, char name[], arduino::StringSumHelper 
 }
 
 boolean notificationSent = false;
+String last_notification = "";
 
 void sendPush(String title, String message) {
+  last_notification = message;
   if (notificationSent) {
     return;
   }
@@ -405,12 +407,12 @@ void loop(void) {
   //fix errors in sensor data - This is critical error !!!
   if (TwaterBottom < 0 && TwaterTop > 0) {
     Serial.print("CRITICAL ERROR: Bottom Water Temperature sensor indicates negative value!!!");
-    TwaterBottom = TwaterTop;
+    TwaterBottom = TwaterTop - (tempWaterRequiredHigh - tempWaterRequiredDown);
     sendPush("critical error", "CRITICAL ERROR: Bottom Water Temperature sensor indicates negative value!!!" );
   }
   if (TwaterTop < 0 && TwaterBottom > 0) {
     Serial.print("CRITICAL ERROR: Top Water Temperature sensor indicates negative value!!!");
-    TwaterTop = TwaterBottom;
+    TwaterTop = TwaterBottom + (tempWaterRequiredHigh - tempWaterRequiredDown);
     sendPush("critical error", "CRITICAL ERROR: Top Water Temperature sensor indicates negative value!!!" );
   }
 
@@ -500,6 +502,7 @@ void loop(void) {
             printControlValue(client, "Required Water Bottom", tempWaterRequiredDown, "WaterReqBottom");
             printStatusValue(client, "Current Loop Nr", currentTime);
             printStatusString(client, "Current Time", String(hour()) + ":" + String(minute()) + ":" + String(second()));
+            printStatusString(client, "Last message", last_notification);
             client.print("</table>");
             client.print("</br></br><a class='btn btn-primary' href=\"/reboot\"> REBOOT </a> ");
             
