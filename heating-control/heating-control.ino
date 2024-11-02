@@ -1,13 +1,12 @@
 //#define WIFI_SSID "your wifi"
 //#define WIFI_PASSWORD "wifi password"
-//#define PushsaferKey "XXXXXXXXXXXXX"
 #include "secrets.h"
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <EEPROM.h>
 #include <TimeLib.h>
-#include <Pushsafer.h>
+
 
 void (*resetFunc)(void) = 0;
 
@@ -95,11 +94,6 @@ const int delayBetweenHomeChanges = 3600;
 
 WiFiServer server(80);
 int status = WL_IDLE_STATUS;
-
-/*WiFiClientSecure client;*/
-WiFiClient clientPush;
-Pushsafer pushsafer(PushsaferKey, clientPush);
-
 
 float getAnalogTemperature(int pinNr) {
 
@@ -220,7 +214,7 @@ void printStatusValue(WiFiClient client, char name[], float value) {
   client.print(" </td></tr>");
 }
 
-void printStatusString(WiFiClient client, char name[], arduino::StringSumHelper value) {
+void printStatusString(WiFiClient client, char name[], String value) {
   client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
   client.print(name);
   client.print(" </td><td> ");
@@ -231,36 +225,6 @@ void printStatusString(WiFiClient client, char name[], arduino::StringSumHelper 
 boolean notificationSent = false;
 String last_notification = "";
 
-void sendPush(String title, String message) {
-  last_notification = message;
-  if (notificationSent) {
-    return;
-  }
-  struct PushSaferInput input;
-  input.message = message;
-  input.title = title;
-  input.sound = "8";
-  input.vibration = "1";
-  input.icon = "1";
-  input.iconcolor = "#FFCCCC";
-  input.priority = "1";
-  input.device = "heating";
-  input.url = "https://www.pushsafer.com";
-  input.urlTitle = "Open Pushsafer.com";
-  input.picture = "";
-  input.picture2 = "";
-  input.picture3 = "";
-  input.time2live = "";
-  input.retry = "";
-  input.expire = "";
-  input.confirm = "";
-  input.answer = "";
-  input.answeroptions = "";
-  input.answerforce = "";
-
-  Serial.println(pushsafer.sendEvent(input));
-  notificationSent = true;
-}
 
 
 
@@ -321,7 +285,6 @@ void setup(void) {
     setTime(WiFi.getTime());
   }
 
-  sendPush("heating startup", "Heating rebooted" );
   notificationSent = false;
 }
 
@@ -408,12 +371,10 @@ void loop(void) {
   if (TwaterBottom < 0 && TwaterTop > 0) {
     Serial.print("CRITICAL ERROR: Bottom Water Temperature sensor indicates negative value!!!");
     TwaterBottom = TwaterTop - (tempWaterRequiredHigh - tempWaterRequiredDown);
-    sendPush("critical error", "CRITICAL ERROR: Bottom Water Temperature sensor indicates negative value!!!" );
   }
   if (TwaterTop < 0 && TwaterBottom > 0) {
     Serial.print("CRITICAL ERROR: Top Water Temperature sensor indicates negative value!!!");
     TwaterTop = TwaterBottom + (tempWaterRequiredHigh - tempWaterRequiredDown);
-    sendPush("critical error", "CRITICAL ERROR: Top Water Temperature sensor indicates negative value!!!" );
   }
 
   if (currentTime % delayBetweenWaterChanges == 0) {
