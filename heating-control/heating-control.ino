@@ -69,7 +69,7 @@ const int VYP = HIGH;  //relatka maju opacne spinanie, preto VYP je high voltage
 //********** TEMPERATURES *****************
 int TmaxIN = 45;         //max teplota na vstupe podlahovky
 int TmaxOUT = 35;        //max teplota na vystupe podlahovky
-int ThomeRequired = 23;  //pozadovana teplota v dome
+int ThomeRequired = 24;  //pozadovana teplota v dome
 float prevThome = 0;
 int TrequiredOUT = ThomeRequired + 3;  //inicializacia vystupnej teploty podlahovky
 int tempWaterRequiredHigh = 57;        //pozadovana horna teplota vody
@@ -84,7 +84,20 @@ const int stepDown = 1000;  //cas v milisekundach kolko posuvame krokove motory 
 int currentTime = 0;
 const int delayBetweenChanges = 30;
 const int delayBetweenWaterChanges = 5;
-const int delayBetweenHomeChanges = 3600;
+const int delayBetweenHomeChanges = 600;  // 10 minutes for responsive control
+
+//********** TEMPERATURE HISTORY for better control ******************
+#define HISTORY_SIZE 4
+float homeHistory[HISTORY_SIZE] = {0, 0, 0, 0};
+int historyIndex = 0;
+boolean historyInitialized = false;
+
+//********** THERMAL CAPACITY TRACKING ******************
+float thermalTimeConstant = 0;      // Minutes to reach 63% of target (tau)
+float heatLossRate = 0;              // Degrees per hour when not heating
+float heatingEfficiency = 0;         // Temperature rise per degree of heating delta
+unsigned long lastThermalCalc = 0;
+#define THERMAL_CALC_INTERVAL 3600   // Recalculate every hour
 
 
 //*********************** WIFI *************************
@@ -192,6 +205,63 @@ void saveEEPROMValue(int address, int value) {
   }
 }
 
+void calculateThermalCharacteristics(void) {
+  // Only calculate if we have enough history
+  if (!historyInitialized) {
+    return;
+  }
+
+  // Get oldest temperature reading
+  int oldestIndex = historyIndex;
+  float oldestTemp = homeHistory[oldestIndex];
+  float tempChange = Thome - oldestTemp;
+  float timeSpanHours = (HISTORY_SIZE * delayBetweenHomeChanges) / 3600.0;
+
+  // Calculate heating delivery (proxy for heat input)
+  float heatingDelta = Tin - Tout;  // Heat being delivered to floor
+
+  // Calculate temperature change rate (degrees per hour)
+  float tempChangeRate = tempChange / timeSpanHours;
+
+  // Estimate heat loss rate (when heating is minimal)
+  if (heatingDelta < 2.0 && abs(tempChangeRate) > 0.01) {
+    // House is cooling down or maintaining with minimal heating
+    heatLossRate = abs(tempChangeRate);
+    Serial.print("Heat loss rate: ");
+    Serial.print(heatLossRate);
+    Serial.println(" C/hour");
+  }
+
+  // Estimate heating efficiency (how much house warms per degree of heating delta)
+  if (heatingDelta > 5.0 && abs(tempChangeRate) > 0.01) {
+    // Actively heating
+    heatingEfficiency = tempChangeRate / heatingDelta;
+    Serial.print("Heating efficiency: ");
+    Serial.print(heatingEfficiency);
+    Serial.println(" C/hour per degree delta");
+  }
+
+  // Estimate thermal time constant (tau)
+  // tau = how long to reach 63% of steady state
+  // For a simple model: tau ~ thermal_mass / heat_loss_coefficient
+  if (heatLossRate > 0.01) {
+    float steadyStateTemp = ThomeRequired;
+    float tempError = steadyStateTemp - oldestTemp;
+    if (abs(tempError) > 0.5) {
+      // Time constant estimation based on exponential response
+      // T(t) = T_ss - (T_ss - T0) * e^(-t/tau)
+      // Rough estimate: tau ~ time / ln((T0-T_ss)/(T-T_ss))
+      float ratio = abs(tempError) / abs(ThomeRequired - Thome);
+      if (ratio > 1.01) {  // Avoid log of values near 1
+        thermalTimeConstant = (timeSpanHours * 60) / log(ratio);
+        Serial.print("Thermal time constant: ");
+        Serial.print(thermalTimeConstant);
+        Serial.println(" minutes");
+      }
+    }
+  }
+}
+
 void printControlValue(WiFiClient client, char name[], float value, char urlPrefix[]) {
   client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
   client.print(name);
@@ -243,6 +313,12 @@ void setup(void) {
   TmaxOUT = initFromEEPROM(ADDRESS_TmaxOUT, 35, 10, 37);
   ThomeRequired = initFromEEPROM(ADDRESS_ThomeRequired, 23, 10, 26);  //pozadovana teplota v dome
   prevThome = getAnalogTemperature(THERMISTORPIN);
+
+  // Initialize temperature history with current reading
+  for (int i = 0; i < HISTORY_SIZE; i++) {
+    homeHistory[i] = prevThome;
+  }
+
   TrequiredOUT = initFromEEPROM(ADDRESS_TrequiredOUT, ThomeRequired + 3, 10,
                                 TmaxOUT);                                             //inicializacia vystupnej teploty podlahovky
   tempWaterRequiredHigh = initFromEEPROM(ADDRESS_tempWaterRequiredHigh, 57, 10, 70);  //pozadovana horna teplota vody
@@ -324,14 +400,16 @@ void loop(void) {
   } else {
     if (currentTime % delayBetweenChanges == 0) {
       //standard control loop
-      if (Tout > TrequiredOUT + 1 || Tin > TmaxIN) {
-        //Cooling
-        Serial.println("Cooling heating");
-        if (Tin > TrequiredOUT + 1.5) {
-          tempDown();
-        }
+      if (Tout > TrequiredOUT + 1) {
+        //Output too high - cool down
+        Serial.println("Cooling heating - output too high");
+        tempDown();
+      } else if (Tin > TmaxIN) {
+        //Input too high - safety cooling
+        Serial.println("Cooling heating - input too high");
+        tempDown();
       } else if (TrequiredOUT - 0.2 > Tout && Tin < TmaxIN && Tout < TmaxOUT) {
-        //Heating
+        //Heating - output below target and safe to increase
         Serial.println("Increasing heating");
         tempUp();
       } else {
@@ -343,15 +421,70 @@ void loop(void) {
     }
   }
 
+  // Update temperature history
+  homeHistory[historyIndex] = Thome;
+  historyIndex = (historyIndex + 1) % HISTORY_SIZE;
+  if (historyIndex == 0) {
+    historyInitialized = true;  // We've filled the array at least once
+  }
+
   if (currentTime % delayBetweenHomeChanges == 0) {
-    if (Thome > ThomeRequired && TrequiredOUT > ThomeRequired && prevThome <= Thome) {
-      TrequiredOUT -= 1;
-      Serial.print("!!!!!!!!!!   Decreasing out temperature: ");
-    } else if (TmaxOUT < TrequiredOUT && ((Thome < (ThomeRequired - 0.2) && prevThome >= Thome) || Thome < (ThomeRequired - 0.5))) {
-      TrequiredOUT += 1;
-      Serial.print("!!!!!!!!!!   Increasing out temperature: ");
+    // Calculate thermal characteristics every hour
+    if (currentTime % THERMAL_CALC_INTERVAL == 0) {
+      calculateThermalCharacteristics();
+    }
+
+    // Calculate temperature error (positive = too cold, negative = too warm)
+    float homeError = ThomeRequired - Thome;
+
+    // Calculate rate of change (positive = warming, negative = cooling)
+    float homeRate = Thome - prevThome;
+
+    // Calculate trend over full history if available
+    float tempTrend = 0;
+    if (historyInitialized) {
+      int oldestIndex = historyIndex;  // Next position is the oldest
+      float timeSpanHours = (HISTORY_SIZE * delayBetweenHomeChanges) / 3600.0;
+      tempTrend = (Thome - homeHistory[oldestIndex]) / timeSpanHours;  // C per hour
+      Serial.print("Temperature trend over ");
+      Serial.print(HISTORY_SIZE * delayBetweenHomeChanges / 60);
+      Serial.print(" min: ");
+      Serial.print(tempTrend);
+      Serial.println(" C/hour");
+    }
+
+    // Proportional control with rate damping
+    float adjustment = 0;
+    const float deadband = 0.2;  // Don't adjust if within 0.2°C of target
+
+    if (abs(homeError) > deadband) {
+      // Proportional term: bigger error = bigger adjustment (2x multiplier)
+      adjustment = homeError * 2.0;
+
+      // Derivative term: if changing in right direction, slow down adjustment
+      // This prevents overshoot
+      adjustment -= homeRate * 1.5;
+
+      // Clamp adjustment to reasonable range (-2 to +2 degrees)
+      if (adjustment > 2.0) adjustment = 2.0;
+      if (adjustment < -2.0) adjustment = -2.0;
+
+      Serial.print("Home temp control - Error: ");
+      Serial.print(homeError);
+      Serial.print("C, Rate: ");
+      Serial.print(homeRate);
+      Serial.print("C, Adjustment: ");
+      Serial.println(adjustment);
+
+      TrequiredOUT += adjustment;
+
+      // Ensure we stay within safe limits
+      if (TrequiredOUT < ThomeRequired) TrequiredOUT = ThomeRequired;
+      if (TrequiredOUT > TmaxOUT) TrequiredOUT = TmaxOUT;
+
+      Serial.print("!!!!!!!!!!   Adjusted out temperature to: ");
     } else {
-      Serial.print("!!!!!!!!!!   Keep out temperature: ");
+      Serial.print("!!!!!!!!!!   Temperature within deadband, keeping out temperature: ");
     }
     Serial.println(TrequiredOUT);
     prevThome = Thome;
@@ -465,6 +598,109 @@ void loop(void) {
             printStatusString(client, "Current Time", String(hour()) + ":" + String(minute()) + ":" + String(second()));
             printStatusString(client, "Last message", last_notification);
             client.print("</table>");
+
+            // Temperature History
+            client.print("</br><h5>Temperature History (Last ");
+            client.print(HISTORY_SIZE);
+            client.print(" readings)</h5>");
+            client.print("<table style='border: 1px solid black;'>");
+            client.print("<tr style='background-color:#4CAF50;color:white;'><th>Reading</th><th>Home Temp (C)</th></tr>");
+
+            // Display history in reverse order (newest first)
+            for (int i = 0; i < HISTORY_SIZE; i++) {
+              int displayIndex = (historyIndex - 1 - i + HISTORY_SIZE) % HISTORY_SIZE;
+              if (homeHistory[displayIndex] != 0 || historyInitialized) {
+                client.print("<tr style='background-color:lightgrey;'><td>");
+                if (i == 0) {
+                  client.print("Latest");
+                } else {
+                  client.print("-");
+                  client.print(i * (delayBetweenHomeChanges / 60));
+                  client.print(" min");
+                }
+                client.print("</td><td>");
+                client.print(homeHistory[displayIndex]);
+                client.print("</td></tr>");
+              }
+            }
+            client.print("</table>");
+
+            // Thermal Characteristics
+            client.print("</br><h5>House Thermal Characteristics</h5>");
+            client.print("<table style='border: 1px solid black;'>");
+            client.print("<tr style='background-color:#2196F3;color:white;'><th>Metric</th><th>Value</th><th>Meaning</th></tr>");
+
+            // Heating Delta
+            float heatingDelta = Tin - Tout;
+            client.print("<tr style='background-color:lightgrey;'><td>Heat Delivery</td><td>");
+            client.print(heatingDelta);
+            client.print(" C</td><td>");
+            if (heatingDelta > 5) {
+              client.print("Actively heating");
+            } else if (heatingDelta > 2) {
+              client.print("Moderate heating");
+            } else {
+              client.print("Minimal heating");
+            }
+            client.print("</td></tr>");
+
+            // Temperature trend
+            if (historyInitialized) {
+              int oldestIndex = historyIndex;
+              float timeSpanHours = (HISTORY_SIZE * delayBetweenHomeChanges) / 3600.0;
+              float tempTrend = (Thome - homeHistory[oldestIndex]) / timeSpanHours;
+              client.print("<tr style='background-color:lightgrey;'><td>Temp Change Rate</td><td>");
+              client.print(tempTrend);
+              client.print(" C/h</td><td>");
+              if (tempTrend > 0.1) {
+                client.print("Warming up");
+              } else if (tempTrend < -0.1) {
+                client.print("Cooling down");
+              } else {
+                client.print("Stable");
+              }
+              client.print("</td></tr>");
+            }
+
+            // Heat loss rate
+            if (heatLossRate > 0) {
+              client.print("<tr style='background-color:lightgrey;'><td>Heat Loss Rate</td><td>");
+              client.print(heatLossRate);
+              client.print(" C/h</td><td>");
+              if (heatLossRate > 1.0) {
+                client.print("Poor insulation");
+              } else if (heatLossRate > 0.5) {
+                client.print("Average insulation");
+              } else {
+                client.print("Good insulation");
+              }
+              client.print("</td></tr>");
+            }
+
+            // Heating efficiency
+            if (heatingEfficiency != 0) {
+              client.print("<tr style='background-color:lightgrey;'><td>Heating Efficiency</td><td>");
+              client.print(heatingEfficiency, 4);
+              client.print("</td><td>C/h per degree delta</td></tr>");
+            }
+
+            // Thermal time constant
+            if (thermalTimeConstant > 0) {
+              client.print("<tr style='background-color:lightgrey;'><td>Time Constant (tau)</td><td>");
+              client.print(thermalTimeConstant);
+              client.print(" min</td><td>");
+              if (thermalTimeConstant > 180) {
+                client.print("High thermal mass");
+              } else if (thermalTimeConstant > 60) {
+                client.print("Medium thermal mass");
+              } else {
+                client.print("Low thermal mass");
+              }
+              client.print("</td></tr>");
+            }
+
+            client.print("</table>");
+
             client.print("</br></br><a class='btn btn-primary' href=\"/reboot\"> REBOOT </a> ");
             
             client.println();
