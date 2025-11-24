@@ -92,6 +92,18 @@ float homeHistory[HISTORY_SIZE] = {0, 0, 0, 0};
 int historyIndex = 0;
 boolean historyInitialized = false;
 
+//********** 24-HOUR HISTORY for UI charts (store every 30 min = 48 points) ******************
+#define CHART_HISTORY_SIZE 48
+#define CHART_UPDATE_INTERVAL 1800  // 30 minutes in seconds
+float chartHistoryThome[CHART_HISTORY_SIZE];
+float chartHistoryTin[CHART_HISTORY_SIZE];
+float chartHistoryTout[CHART_HISTORY_SIZE];
+float chartHistoryTwaterTop[CHART_HISTORY_SIZE];
+float chartHistoryTwaterBottom[CHART_HISTORY_SIZE];
+int chartHistoryIndex = 0;
+boolean chartHistoryInitialized = false;
+unsigned long lastChartUpdate = 0;
+
 //********** THERMAL CAPACITY TRACKING ******************
 float thermalTimeConstant = 0;      // Minutes to reach 63% of target (tau)
 float heatLossRate = 0;              // Degrees per hour when not heating
@@ -262,34 +274,80 @@ void calculateThermalCharacteristics(void) {
   }
 }
 
-void printControlValue(WiFiClient client, char name[], float value, char urlPrefix[]) {
-  client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
+// Generate inline SVG sparkline - optimized for speed
+void printSparkline(WiFiClient client, float history[], int size, boolean initialized) {
+  if (!initialized || size < 2) {
+    client.print("<svg width='80' height='24'></svg>");
+    return;
+  }
+
+  // Find min/max for scaling
+  float minVal = history[0];
+  float maxVal = history[0];
+  for (int i = 1; i < size; i++) {
+    if (history[i] > 0) {  // Skip uninitialized values
+      if (history[i] < minVal) minVal = history[i];
+      if (history[i] > maxVal) maxVal = history[i];
+    }
+  }
+
+  float range = maxVal - minVal;
+  if (range < 0.1) range = 1.0;  // Avoid division by zero
+
+  client.print("<svg width='80' height='24' style='vertical-align:middle'>");
+  client.print("<polyline fill='none' stroke='#4CAF50' stroke-width='1.5' points='");
+
+  // Generate points
+  for (int i = 0; i < size; i++) {
+    if (history[i] > 0) {
+      float x = (i * 80.0) / (size - 1);
+      float y = 22 - ((history[i] - minVal) / range * 20);
+      client.print(x);
+      client.print(",");
+      client.print(y);
+      client.print(" ");
+    }
+  }
+  client.print("'/></svg>");
+}
+
+void printControlValue(WiFiClient client, char name[], float value, char urlPrefix[], float history[], boolean showChart) {
+  client.print("<tr><td class='label'>");
   client.print(name);
-  client.print(" </td><td>");
-  client.print(" <a class='btn btn-primary' href=\"/");
+  client.print("</td><td class='value'>");
+  client.print("<button onclick=\"location.href='/");
   client.print(urlPrefix);
-  client.print("/UP\"> UP </a> ");
-  client.print(value);
-  client.print(" <a class='btn btn-primary' href=\"/");
+  client.print("/UP'\">+</button>");
+  client.print("<span class='temp'>");
+  client.print(value, 1);
+  client.print("\u00B0C</span>");
+  client.print("<button onclick=\"location.href='/");
   client.print(urlPrefix);
-  client.print("/DOWN\"> Down </a> ");
+  client.print("/DOWN'\">-</button>");
+  if (showChart) {
+    printSparkline(client, history, CHART_HISTORY_SIZE, chartHistoryInitialized);
+  }
   client.print("</td></tr>");
 }
 
-void printStatusValue(WiFiClient client, char name[], float value) {
-  client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
+void printStatusValue(WiFiClient client, char name[], float value, float history[], boolean showChart) {
+  client.print("<tr><td class='label'>");
   client.print(name);
-  client.print(" </td><td> ");
-  client.print(value);
-  client.print(" </td></tr>");
+  client.print("</td><td class='value'><span class='temp'>");
+  client.print(value, 1);
+  client.print("\u00B0C</span>");
+  if (showChart) {
+    printSparkline(client, history, CHART_HISTORY_SIZE, chartHistoryInitialized);
+  }
+  client.print("</td></tr>");
 }
 
 void printStatusString(WiFiClient client, char name[], String value) {
-  client.print("<tr style='background-color:lightgrey;padding-top:3px;'><td> ");
+  client.print("<tr><td class='label'>");
   client.print(name);
-  client.print(" </td><td> ");
+  client.print("</td><td class='value'>");
   client.print(value);
-  client.print(" </td></tr>");
+  client.print("</td></tr>");
 }
 
 boolean notificationSent = false;
@@ -317,6 +375,15 @@ void setup(void) {
   // Initialize temperature history with current reading
   for (int i = 0; i < HISTORY_SIZE; i++) {
     homeHistory[i] = prevThome;
+  }
+
+  // Initialize chart history
+  for (int i = 0; i < CHART_HISTORY_SIZE; i++) {
+    chartHistoryThome[i] = 0;
+    chartHistoryTin[i] = 0;
+    chartHistoryTout[i] = 0;
+    chartHistoryTwaterTop[i] = 0;
+    chartHistoryTwaterBottom[i] = 0;
   }
 
   TrequiredOUT = initFromEEPROM(ADDRESS_TrequiredOUT, ThomeRequired + 3, 10,
@@ -529,6 +596,20 @@ void loop(void) {
   Serial.println("********************************");
   Serial.println("");
 
+  // Update 24-hour chart history every 30 minutes
+  if (currentTime >= lastChartUpdate + CHART_UPDATE_INTERVAL) {
+    chartHistoryThome[chartHistoryIndex] = Thome;
+    chartHistoryTin[chartHistoryIndex] = Tin;
+    chartHistoryTout[chartHistoryIndex] = Tout;
+    chartHistoryTwaterTop[chartHistoryIndex] = TwaterTop;
+    chartHistoryTwaterBottom[chartHistoryIndex] = TwaterBottom;
+    chartHistoryIndex = (chartHistoryIndex + 1) % CHART_HISTORY_SIZE;
+    if (chartHistoryIndex == 0) {
+      chartHistoryInitialized = true;
+    }
+    lastChartUpdate = currentTime;
+  }
+
   if (currentTime % 3600 == 0) {
     storeValuesToEEPROM();
   }
@@ -576,71 +657,81 @@ void loop(void) {
             client.println("Content-type:text/html");
             client.println();
 
-            client.print("<link href='https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-alpha.6/css/bootstrap.min.css' rel='stylesheet'/>");
-            client.print("</br></br><a class='btn btn-primary' href=\"/\"> REFRESH </a> ");
+            // Modern, fast-rendering CSS (optimized for minimal bytes & max performance)
+            client.print("<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>");
+            client.print("<meta http-equiv='Cache-Control' content='no-cache'>");
+            client.print("<title>Heating Control</title><style>");
+            client.print("*{margin:0;padding:0;box-sizing:border-box}");
+            client.print("body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:16px}");
+            client.print(".container{max-width:800px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.1)}");
+            client.print(".header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:24px;border-radius:12px 12px 0 0}");
+            client.print(".header h1{font-size:24px;margin-bottom:8px}");
+            client.print(".header .time{opacity:.9;font-size:14px}");
+            client.print(".section{padding:20px;border-bottom:1px solid #e0e0e0}");
+            client.print(".section:last-child{border-bottom:none}");
+            client.print(".section h2{font-size:18px;color:#333;margin-bottom:16px;font-weight:600}");
+            client.print("table{width:100%;border-collapse:collapse}");
+            client.print("tr{border-bottom:1px solid #f0f0f0}tr:last-child{border-bottom:none}");
+            client.print("td{padding:12px 8px}");
+            client.print(".label{font-weight:500;color:#555;width:50%}");
+            client.print(".value{text-align:right;font-weight:600;color:#333}");
+            client.print(".temp{font-size:20px;color:#667eea;margin:0 12px;display:inline-block;min-width:60px}");
+            client.print("button{background:#667eea;color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:14px;font-weight:600}");
+            client.print(".refresh-btn,.reboot-btn{color:#fff;text-decoration:none;padding:10px 20px;border-radius:6px;display:inline-block;font-weight:600}");
+            client.print(".refresh-btn{background:#4CAF50;margin-bottom:16px}");
+            client.print(".reboot-btn{background:#f44336;margin-top:16px}");
+            client.print(".badge{display:inline-block;padding:4px 8px;border-radius:4px;font-size:12px;font-weight:600;margin-left:8px}");
+            client.print(".badge-heating{background:#ff9800;color:#fff}");
+            client.print(".badge-cooling{background:#2196F3;color:#fff}");
+            client.print(".badge-stable{background:#4CAF50;color:#fff}");
+            client.print("@media(max-width:640px){body{padding:8px}.header{padding:16px}.section{padding:12px}");
+            client.print(".temp{font-size:18px;margin:0 8px}button{padding:4px 10px;font-size:12px}}");
+            client.print("</style></head><body>");
 
-            client.print("<table style='border: 1px solid black;'>");
-            printStatusValue(client, "Current Home Temperature", Thome);
-            printControlValue(client, "Requested Home Temperature", ThomeRequired, "HomeReq");
+            client.print("<div class='container'>");
+            client.print("<div class='header'>");
+            client.print("<h1>\u2600\uFE0F Heating Control System</h1>");
+            client.print("<div class='time'>");
+            client.print(String(hour()) + ":" + (minute() < 10 ? "0" : "") + String(minute()) + ":" + (second() < 10 ? "0" : "") + String(second()));
+            client.print(" | Loop: ");
+            client.print(currentTime);
+            client.print("</div></div>");
 
-            printStatusValue(client, "Current Heating IN", Tin);
-            printControlValue(client, "MAX Heating IN", TmaxIN, "HeatingMaxIn");
+            client.print("<div class='section'><a class='refresh-btn' href='/'>Refresh</a>");
+            client.print("<h2>\uD83C\uDFE0 Home Temperature</h2><table>");
+            printStatusValue(client, "Current", Thome, chartHistoryThome, true);
+            printControlValue(client, "Target", ThomeRequired, "HomeReq", chartHistoryThome, false);
+            client.print("</table></div>");
 
-            printStatusValue(client, "Current Heating OUT", Tout);
-            printControlValue(client, "Required Heating OUT", TrequiredOUT, "HeatingReqOut");
-            printControlValue(client, "MAX Heating OUT", TmaxOUT, "HeatingMaxOut");
+            client.print("<div class='section'><h2>\uD83D\uDD25 Heating System</h2><table>");
+            printStatusValue(client, "Input Temperature", Tin, chartHistoryTin, true);
+            printControlValue(client, "Max Input", TmaxIN, "HeatingMaxIn", chartHistoryTin, false);
+            printStatusValue(client, "Output Temperature", Tout, chartHistoryTout, true);
+            printControlValue(client, "Target Output", TrequiredOUT, "HeatingReqOut", chartHistoryTout, false);
+            printControlValue(client, "Max Output", TmaxOUT, "HeatingMaxOut", chartHistoryTout, false);
+            client.print("</table></div>");
 
-            printStatusValue(client, "Current Water Top", TwaterTop);
-            printControlValue(client, "Required Water TOP", tempWaterRequiredHigh, "WaterReqTop");
-            printStatusValue(client, "Current Water Bottom", TwaterBottom);
-            printControlValue(client, "Required Water Bottom", tempWaterRequiredDown, "WaterReqBottom");
-            printStatusValue(client, "Current Loop Nr", currentTime);
-            printStatusString(client, "Current Time", String(hour()) + ":" + String(minute()) + ":" + String(second()));
-            printStatusString(client, "Last message", last_notification);
-            client.print("</table>");
+            client.print("<div class='section'><h2>\uD83D\uDCA7 Water Heater</h2><table>");
+            printStatusValue(client, "Top Temperature", TwaterTop, chartHistoryTwaterTop, true);
+            printControlValue(client, "Target Top", tempWaterRequiredHigh, "WaterReqTop", chartHistoryTwaterTop, false);
+            printStatusValue(client, "Bottom Temperature", TwaterBottom, chartHistoryTwaterBottom, true);
+            printControlValue(client, "Target Bottom", tempWaterRequiredDown, "WaterReqBottom", chartHistoryTwaterBottom, false);
+            client.print("</table></div>");
 
-            // Temperature History
-            client.print("</br><h5>Temperature History (Last ");
-            client.print(HISTORY_SIZE);
-            client.print(" readings)</h5>");
-            client.print("<table style='border: 1px solid black;'>");
-            client.print("<tr style='background-color:#4CAF50;color:white;'><th>Reading</th><th>Home Temp (C)</th></tr>");
-
-            // Display history in reverse order (newest first)
-            for (int i = 0; i < HISTORY_SIZE; i++) {
-              int displayIndex = (historyIndex - 1 - i + HISTORY_SIZE) % HISTORY_SIZE;
-              if (homeHistory[displayIndex] != 0 || historyInitialized) {
-                client.print("<tr style='background-color:lightgrey;'><td>");
-                if (i == 0) {
-                  client.print("Latest");
-                } else {
-                  client.print("-");
-                  client.print(i * (delayBetweenHomeChanges / 60));
-                  client.print(" min");
-                }
-                client.print("</td><td>");
-                client.print(homeHistory[displayIndex]);
-                client.print("</td></tr>");
-              }
-            }
-            client.print("</table>");
-
-            // Thermal Characteristics
-            client.print("</br><h5>House Thermal Characteristics</h5>");
-            client.print("<table style='border: 1px solid black;'>");
-            client.print("<tr style='background-color:#2196F3;color:white;'><th>Metric</th><th>Value</th><th>Meaning</th></tr>");
+            // System Analytics
+            client.print("<div class='section'><h2>\uD83D\uDCC8 System Analytics</h2><table>");
 
             // Heating Delta
             float heatingDelta = Tin - Tout;
-            client.print("<tr style='background-color:lightgrey;'><td>Heat Delivery</td><td>");
-            client.print(heatingDelta);
-            client.print(" C</td><td>");
+            client.print("<tr><td class='label'>Heat Delivery</td><td class='value'>");
+            client.print(heatingDelta, 1);
+            client.print("\u00B0C");
             if (heatingDelta > 5) {
-              client.print("Actively heating");
+              client.print("<span class='badge badge-heating'>Active</span>");
             } else if (heatingDelta > 2) {
-              client.print("Moderate heating");
+              client.print("<span class='badge badge-stable'>Moderate</span>");
             } else {
-              client.print("Minimal heating");
+              client.print("<span class='badge badge-cooling'>Minimal</span>");
             }
             client.print("</td></tr>");
 
@@ -649,59 +740,63 @@ void loop(void) {
               int oldestIndex = historyIndex;
               float timeSpanHours = (HISTORY_SIZE * delayBetweenHomeChanges) / 3600.0;
               float tempTrend = (Thome - homeHistory[oldestIndex]) / timeSpanHours;
-              client.print("<tr style='background-color:lightgrey;'><td>Temp Change Rate</td><td>");
-              client.print(tempTrend);
-              client.print(" C/h</td><td>");
+              client.print("<tr><td class='label'>Temperature Trend</td><td class='value'>");
+              client.print(tempTrend, 2);
+              client.print(" \u00B0C/h");
               if (tempTrend > 0.1) {
-                client.print("Warming up");
+                client.print("<span class='badge badge-heating'>Warming</span>");
               } else if (tempTrend < -0.1) {
-                client.print("Cooling down");
+                client.print("<span class='badge badge-cooling'>Cooling</span>");
               } else {
-                client.print("Stable");
+                client.print("<span class='badge badge-stable'>Stable</span>");
               }
               client.print("</td></tr>");
             }
 
             // Heat loss rate
             if (heatLossRate > 0) {
-              client.print("<tr style='background-color:lightgrey;'><td>Heat Loss Rate</td><td>");
-              client.print(heatLossRate);
-              client.print(" C/h</td><td>");
+              client.print("<tr><td class='label'>Heat Loss Rate</td><td class='value'>");
+              client.print(heatLossRate, 2);
+              client.print(" \u00B0C/h");
               if (heatLossRate > 1.0) {
-                client.print("Poor insulation");
+                client.print("<span class='badge' style='background:#f44336;color:#fff'>Poor</span>");
               } else if (heatLossRate > 0.5) {
-                client.print("Average insulation");
+                client.print("<span class='badge badge-stable'>Average</span>");
               } else {
-                client.print("Good insulation");
+                client.print("<span class='badge' style='background:#4CAF50;color:#fff'>Good</span>");
               }
               client.print("</td></tr>");
             }
 
             // Heating efficiency
             if (heatingEfficiency != 0) {
-              client.print("<tr style='background-color:lightgrey;'><td>Heating Efficiency</td><td>");
+              client.print("<tr><td class='label'>Heating Efficiency</td><td class='value'>");
               client.print(heatingEfficiency, 4);
-              client.print("</td><td>C/h per degree delta</td></tr>");
+              client.print(" \u00B0C/h/\u00B0</td></tr>");
             }
 
             // Thermal time constant
             if (thermalTimeConstant > 0) {
-              client.print("<tr style='background-color:lightgrey;'><td>Time Constant (tau)</td><td>");
-              client.print(thermalTimeConstant);
-              client.print(" min</td><td>");
+              client.print("<tr><td class='label'>Thermal Constant</td><td class='value'>");
+              client.print(thermalTimeConstant, 0);
+              client.print(" min");
               if (thermalTimeConstant > 180) {
-                client.print("High thermal mass");
+                client.print("<span class='badge' style='background:#2196F3;color:#fff'>High Mass</span>");
               } else if (thermalTimeConstant > 60) {
-                client.print("Medium thermal mass");
+                client.print("<span class='badge badge-stable'>Medium</span>");
               } else {
-                client.print("Low thermal mass");
+                client.print("<span class='badge' style='background:#ff9800;color:#fff'>Low Mass</span>");
               }
               client.print("</td></tr>");
             }
 
-            client.print("</table>");
+            client.print("</table></div>");
 
-            client.print("</br></br><a class='btn btn-primary' href=\"/reboot\"> REBOOT </a> ");
+            client.print("<div class='section' style='text-align:center'>");
+            client.print("<a class='reboot-btn' href='/reboot'>Reboot System</a>");
+            client.print("</div>");
+
+            client.print("</div></body></html>");
             
             client.println();
             // break out of the while loop:
