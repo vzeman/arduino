@@ -6,6 +6,8 @@
 #include <DallasTemperature.h>
 #include <EEPROM.h>
 #include <TimeLib.h>
+#include <SPI.h>
+#include <WiFiNINA.h>
 
 
 void (*resetFunc)(void) = 0;
@@ -71,6 +73,13 @@ int TmaxIN = 45;         //max teplota na vstupe podlahovky
 int TmaxOUT = 35;        //max teplota na vystupe podlahovky
 int ThomeRequired = 24;  //pozadovana teplota v dome
 float prevThome = 0;
+
+// Global temperature sensor readings
+float Thome;
+float Tin;
+float Tout;
+float TwaterTop;
+float TwaterBottom;
 int TrequiredOUT = ThomeRequired + 3;  //inicializacia vystupnej teploty podlahovky
 int tempWaterRequiredHigh = 57;        //pozadovana horna teplota vody
 int tempWaterRequiredDown = 40;        //pozadovana dolna teplota vody
@@ -83,7 +92,7 @@ const int stepDown = 1000;  //cas v milisekundach kolko posuvame krokove motory 
 //********** TIME control ******************
 int currentTime = 0;
 const int delayBetweenChanges = 30;
-const int delayBetweenWaterChanges = 5;
+const int delayBetweenWaterChanges = 30;  // 0.5 minute - prevent too frequent adjustments
 const int delayBetweenHomeChanges = 600;  // 10 minutes for responsive control
 
 //********** TEMPERATURE HISTORY for better control ******************
@@ -111,12 +120,35 @@ float heatingEfficiency = 0;         // Temperature rise per degree of heating d
 unsigned long lastThermalCalc = 0;
 #define THERMAL_CALC_INTERVAL 3600   // Recalculate every hour
 
+//********** ACTION LOG for step motor movements ******************
+#define ACTION_LOG_SIZE 10
+struct ActionEntry {
+  int timestamp;      // currentTime when action occurred
+  byte hour;
+  byte minute;
+  char system;        // 'H' = Heating, 'W' = Water
+  char direction;     // 'U' = Up, 'D' = Down
+  char reason[20];    // Short reason for the action
+};
+ActionEntry actionLog[ACTION_LOG_SIZE];
+int actionLogIndex = 0;
+boolean actionLogFull = false;
+
+void logAction(char system, char direction, const char* reason) {
+  actionLog[actionLogIndex].timestamp = currentTime;
+  actionLog[actionLogIndex].hour = hour();
+  actionLog[actionLogIndex].minute = minute();
+  actionLog[actionLogIndex].system = system;
+  actionLog[actionLogIndex].direction = direction;
+  strncpy(actionLog[actionLogIndex].reason, reason, 19);
+  actionLog[actionLogIndex].reason[19] = '\0';
+
+  actionLogIndex = (actionLogIndex + 1) % ACTION_LOG_SIZE;
+  if (actionLogIndex == 0) actionLogFull = true;
+}
+
 
 //*********************** WIFI *************************
-#include <SPI.h>
-#include <WiFiNINA.h>
-
-
 WiFiServer server(80);
 int status = WL_IDLE_STATUS;
 
@@ -274,6 +306,117 @@ void calculateThermalCharacteristics(void) {
   }
 }
 
+// Generate full temperature timeline chart
+void printTemperatureTimeline(WiFiClient& client) {
+  client.print("<svg width='100%' height='200' viewBox='0 0 400 200' style='background:#fafafa;border-radius:8px'>");
+
+  // Find min/max across all sensors for scaling
+  float minTemp = 100, maxTemp = 0;
+  int validPoints = 0;
+  for (int i = 0; i < CHART_HISTORY_SIZE; i++) {
+    if (chartHistoryThome[i] > 0) {
+      if (chartHistoryThome[i] < minTemp) minTemp = chartHistoryThome[i];
+      if (chartHistoryThome[i] > maxTemp) maxTemp = chartHistoryThome[i];
+      validPoints++;
+    }
+    if (chartHistoryTin[i] > 0) {
+      if (chartHistoryTin[i] < minTemp) minTemp = chartHistoryTin[i];
+      if (chartHistoryTin[i] > maxTemp) maxTemp = chartHistoryTin[i];
+    }
+    if (chartHistoryTout[i] > 0) {
+      if (chartHistoryTout[i] < minTemp) minTemp = chartHistoryTout[i];
+      if (chartHistoryTout[i] > maxTemp) maxTemp = chartHistoryTout[i];
+    }
+    if (chartHistoryTwaterTop[i] > 0) {
+      if (chartHistoryTwaterTop[i] < minTemp) minTemp = chartHistoryTwaterTop[i];
+      if (chartHistoryTwaterTop[i] > maxTemp) maxTemp = chartHistoryTwaterTop[i];
+    }
+  }
+
+  if (validPoints < 2 || maxTemp <= minTemp) {
+    client.print("<text x='200' y='100' text-anchor='middle' fill='#888' font-size='14'>Not enough data yet</text>");
+    client.print("</svg>");
+    return;
+  }
+
+  float range = maxTemp - minTemp;
+  if (range < 5) { minTemp -= 2; maxTemp += 2; range = maxTemp - minTemp; }
+
+  // Draw grid lines and labels
+  client.print("<line x1='40' y1='20' x2='40' y2='170' stroke='#ddd' stroke-width='1'/>");
+  client.print("<line x1='40' y1='170' x2='390' y2='170' stroke='#ddd' stroke-width='1'/>");
+
+  // Y-axis labels
+  for (int i = 0; i <= 4; i++) {
+    float temp = minTemp + (range * i / 4);
+    int y = 170 - (i * 37);
+    client.print("<text x='35' y='");
+    client.print(y + 4);
+    client.print("' text-anchor='end' fill='#888' font-size='10'>");
+    client.print((int)temp);
+    client.print("</text>");
+    client.print("<line x1='40' y1='");
+    client.print(y);
+    client.print("' x2='390' y2='");
+    client.print(y);
+    client.print("' stroke='#eee' stroke-width='1'/>");
+  }
+
+  // Helper lambda-like approach using macros for line drawing
+  // Draw each sensor line
+  const char* colors[] = {"#667eea", "#ff9800", "#4CAF50", "#2196F3", "#9C27B0"};
+  float* histories[] = {chartHistoryThome, chartHistoryTin, chartHistoryTout, chartHistoryTwaterTop, chartHistoryTwaterBottom};
+
+  for (int s = 0; s < 5; s++) {
+    client.print("<polyline fill='none' stroke='");
+    client.print(colors[s]);
+    client.print("' stroke-width='2' points='");
+    for (int i = 0; i < CHART_HISTORY_SIZE; i++) {
+      int dataIdx = (chartHistoryIndex + i) % CHART_HISTORY_SIZE;
+      if (histories[s][dataIdx] > 0) {
+        float x = 45 + (i * 340.0 / (CHART_HISTORY_SIZE - 1));
+        float y = 170 - ((histories[s][dataIdx] - minTemp) / range * 150);
+        client.print(x);
+        client.print(",");
+        client.print(y);
+        client.print(" ");
+      }
+    }
+    client.print("'/>");
+  }
+
+  // Draw action markers
+  int logCount = actionLogFull ? ACTION_LOG_SIZE : actionLogIndex;
+  for (int i = 0; i < logCount; i++) {
+    // Map action timestamp to x position (rough estimate based on time)
+    int timeSinceAction = currentTime - actionLog[i].timestamp;
+    if (timeSinceAction < CHART_HISTORY_SIZE * CHART_UPDATE_INTERVAL && timeSinceAction >= 0) {
+      float x = 390 - (timeSinceAction * 340.0 / (CHART_HISTORY_SIZE * CHART_UPDATE_INTERVAL));
+      if (x >= 45) {
+        const char* markerColor = (actionLog[i].system == 'H') ? "#ff9800" : "#2196F3";
+        const char* arrow = (actionLog[i].direction == 'U') ? "M-4,4 L0,-4 L4,4" : "M-4,-4 L0,4 L4,-4";
+        client.print("<g transform='translate(");
+        client.print(x);
+        client.print(",185)'><path d='");
+        client.print(arrow);
+        client.print("' fill='");
+        client.print(markerColor);
+        client.print("'/></g>");
+      }
+    }
+  }
+
+  // Legend
+  client.print("<text x='50' y='195' fill='#667eea' font-size='9'>Home</text>");
+  client.print("<text x='90' y='195' fill='#ff9800' font-size='9'>H-In</text>");
+  client.print("<text x='130' y='195' fill='#4CAF50' font-size='9'>H-Out</text>");
+  client.print("<text x='175' y='195' fill='#2196F3' font-size='9'>W-Top</text>");
+  client.print("<text x='220' y='195' fill='#9C27B0' font-size='9'>W-Bot</text>");
+  client.print("<text x='280' y='195' fill='#888' font-size='9'>&#9650;&#9660; = motor actions</text>");
+
+  client.print("</svg>");
+}
+
 // Generate inline SVG sparkline - optimized for speed
 void printSparkline(WiFiClient client, float history[], int size, boolean initialized) {
   if (!initialized || size < 2) {
@@ -320,7 +463,7 @@ void printControlValue(WiFiClient client, char name[], float value, char urlPref
   client.print("/UP'\">+</button>");
   client.print("<span class='temp'>");
   client.print(value, 1);
-  client.print("\u00B0C</span>");
+  client.print("&#176;C</span>");
   client.print("<button onclick=\"location.href='/");
   client.print(urlPrefix);
   client.print("/DOWN'\">-</button>");
@@ -335,7 +478,7 @@ void printStatusValue(WiFiClient client, char name[], float value, float history
   client.print(name);
   client.print("</td><td class='value'><span class='temp'>");
   client.print(value, 1);
-  client.print("\u00B0C</span>");
+  client.print("&#176;C</span>");
   if (showChart) {
     printSparkline(client, history, CHART_HISTORY_SIZE, chartHistoryInitialized);
   }
@@ -353,15 +496,6 @@ void printStatusString(WiFiClient client, char name[], String value) {
 boolean notificationSent = false;
 String last_notification = "";
 
-
-
-
-
-float Thome;
-float Tin;
-float Tout;
-float TwaterTop;
-float TwaterBottom;
 
 
 
@@ -464,6 +598,7 @@ void loop(void) {
     //safety temperature reached, cool down
     Serial.println("Cooling heating - safety");
     tempDown();
+    logAction('H', 'D', "Safety limit");
   } else {
     if (currentTime % delayBetweenChanges == 0) {
       //standard control loop
@@ -471,14 +606,17 @@ void loop(void) {
         //Output too high - cool down
         Serial.println("Cooling heating - output too high");
         tempDown();
+        logAction('H', 'D', "Output too high");
       } else if (Tin > TmaxIN) {
         //Input too high - safety cooling
         Serial.println("Cooling heating - input too high");
         tempDown();
+        logAction('H', 'D', "Input too high");
       } else if (TrequiredOUT - 0.2 > Tout && Tin < TmaxIN && Tout < TmaxOUT) {
         //Heating - output below target and safe to increase
         Serial.println("Increasing heating");
         tempUp();
+        logAction('H', 'U', "Below target");
       } else {
         Serial.println("Heating set");
       }
@@ -578,12 +716,41 @@ void loop(void) {
   }
 
   if (currentTime % delayBetweenWaterChanges == 0) {
-    if (TwaterTop > tempWaterRequiredHigh || TwaterBottom > tempWaterRequiredDown) {
+    // Water temperature control - prioritize top temperature (what user draws from)
+    // Use hysteresis: only act when outside deadband to prevent oscillation
+    const float waterDeadband = 2.0;  // Don't adjust if within 2°C of target
+
+    boolean topTooHot = TwaterTop > tempWaterRequiredHigh;
+    boolean bottomTooHot = TwaterBottom > tempWaterRequiredDown;
+    boolean topTooCold = TwaterTop < tempWaterRequiredHigh - waterDeadband;
+    boolean bottomTooCold = TwaterBottom < tempWaterRequiredDown - waterDeadband;
+    boolean topInRange = TwaterTop >= tempWaterRequiredHigh - waterDeadband && TwaterTop <= tempWaterRequiredHigh;
+
+    if (topTooHot || bottomTooHot) {
+      // Safety: cool down if anything is too hot
       Serial.println("Water - cool down");
       tempWaterDown();
-    } else if (tempWaterRequiredHigh - 1 > TwaterTop || tempWaterRequiredDown - 1 > TwaterBottom) {
-      Serial.println("Water - increase temp");
+      logAction('W', 'D', "Too hot");
+    } else if (topTooCold && bottomTooCold) {
+      // Both sensors below target - definitely need more heat
+      Serial.println("Water - increase temp (both cold)");
       tempWaterUp();
+      logAction('W', 'U', "Both below target");
+    } else if (topTooCold && !topInRange) {
+      // Top is below target range - need more heat for hot water draw
+      Serial.println("Water - increase temp (top cold)");
+      tempWaterUp();
+      logAction('W', 'U', "Top below target");
+    } else if (topInRange && bottomTooCold) {
+      // Top is OK but bottom is cold - small adjustment
+      // Only adjust if bottom is significantly below target
+      if (TwaterBottom < tempWaterRequiredDown - waterDeadband - 2) {
+        Serial.println("Water - increase temp (bottom very cold)");
+        tempWaterUp();
+        logAction('W', 'U', "Bottom very cold");
+      } else {
+        Serial.println("Water - All set (top OK, bottom warming)");
+      }
     } else {
       Serial.println("Water - All set");
     }
@@ -690,7 +857,7 @@ void loop(void) {
 
             client.print("<div class='container'>");
             client.print("<div class='header'>");
-            client.print("<h1>\u2600\uFE0F Heating Control System</h1>");
+            client.print("<h1>&#9728; Heating Control System</h1>");
             client.print("<div class='time'>");
             client.print(String(hour()) + ":" + (minute() < 10 ? "0" : "") + String(minute()) + ":" + (second() < 10 ? "0" : "") + String(second()));
             client.print(" | Loop: ");
@@ -698,12 +865,12 @@ void loop(void) {
             client.print("</div></div>");
 
             client.print("<div class='section'><a class='refresh-btn' href='/'>Refresh</a>");
-            client.print("<h2>\uD83C\uDFE0 Home Temperature</h2><table>");
+            client.print("<h2>&#127968; Home Temperature</h2><table>");
             printStatusValue(client, "Current", Thome, chartHistoryThome, true);
             printControlValue(client, "Target", ThomeRequired, "HomeReq", chartHistoryThome, false);
             client.print("</table></div>");
 
-            client.print("<div class='section'><h2>\uD83D\uDD25 Heating System</h2><table>");
+            client.print("<div class='section'><h2>&#128293; Heating System</h2><table>");
             printStatusValue(client, "Input Temperature", Tin, chartHistoryTin, true);
             printControlValue(client, "Max Input", TmaxIN, "HeatingMaxIn", chartHistoryTin, false);
             printStatusValue(client, "Output Temperature", Tout, chartHistoryTout, true);
@@ -711,7 +878,7 @@ void loop(void) {
             printControlValue(client, "Max Output", TmaxOUT, "HeatingMaxOut", chartHistoryTout, false);
             client.print("</table></div>");
 
-            client.print("<div class='section'><h2>\uD83D\uDCA7 Water Heater</h2><table>");
+            client.print("<div class='section'><h2>&#128167; Water Heater</h2><table>");
             printStatusValue(client, "Top Temperature", TwaterTop, chartHistoryTwaterTop, true);
             printControlValue(client, "Target Top", tempWaterRequiredHigh, "WaterReqTop", chartHistoryTwaterTop, false);
             printStatusValue(client, "Bottom Temperature", TwaterBottom, chartHistoryTwaterBottom, true);
@@ -719,13 +886,13 @@ void loop(void) {
             client.print("</table></div>");
 
             // System Analytics
-            client.print("<div class='section'><h2>\uD83D\uDCC8 System Analytics</h2><table>");
+            client.print("<div class='section'><h2>&#128200; System Analytics</h2><table>");
 
             // Heating Delta
             float heatingDelta = Tin - Tout;
             client.print("<tr><td class='label'>Heat Delivery</td><td class='value'>");
             client.print(heatingDelta, 1);
-            client.print("\u00B0C");
+            client.print("&#176;C");
             if (heatingDelta > 5) {
               client.print("<span class='badge badge-heating'>Active</span>");
             } else if (heatingDelta > 2) {
@@ -742,7 +909,7 @@ void loop(void) {
               float tempTrend = (Thome - homeHistory[oldestIndex]) / timeSpanHours;
               client.print("<tr><td class='label'>Temperature Trend</td><td class='value'>");
               client.print(tempTrend, 2);
-              client.print(" \u00B0C/h");
+              client.print(" &#176;C/h");
               if (tempTrend > 0.1) {
                 client.print("<span class='badge badge-heating'>Warming</span>");
               } else if (tempTrend < -0.1) {
@@ -757,7 +924,7 @@ void loop(void) {
             if (heatLossRate > 0) {
               client.print("<tr><td class='label'>Heat Loss Rate</td><td class='value'>");
               client.print(heatLossRate, 2);
-              client.print(" \u00B0C/h");
+              client.print(" &#176;C/h");
               if (heatLossRate > 1.0) {
                 client.print("<span class='badge' style='background:#f44336;color:#fff'>Poor</span>");
               } else if (heatLossRate > 0.5) {
@@ -772,7 +939,7 @@ void loop(void) {
             if (heatingEfficiency != 0) {
               client.print("<tr><td class='label'>Heating Efficiency</td><td class='value'>");
               client.print(heatingEfficiency, 4);
-              client.print(" \u00B0C/h/\u00B0</td></tr>");
+              client.print(" &#176;C/h/&#176;</td></tr>");
             }
 
             // Thermal time constant
@@ -790,6 +957,51 @@ void loop(void) {
               client.print("</td></tr>");
             }
 
+            client.print("</table></div>");
+
+            // Temperature Timeline section
+            client.print("<div class='section'><h2>&#128202; 24-Hour Timeline</h2>");
+            printTemperatureTimeline(client);
+            client.print("</div>");
+
+            // Action Log section
+            client.print("<div class='section'><h2>&#128221; Action Log</h2>");
+            client.print("<table style='font-size:14px'>");
+            client.print("<tr style='background:#f5f5f5'><td style='padding:8px;font-weight:600'>Time</td>");
+            client.print("<td style='padding:8px;font-weight:600'>System</td>");
+            client.print("<td style='padding:8px;font-weight:600'>Action</td>");
+            client.print("<td style='padding:8px;font-weight:600'>Reason</td></tr>");
+
+            int logCount = actionLogFull ? ACTION_LOG_SIZE : actionLogIndex;
+            if (logCount == 0) {
+              client.print("<tr><td colspan='4' style='padding:12px;text-align:center;color:#888'>No actions recorded yet</td></tr>");
+            } else {
+              // Display from newest to oldest
+              for (int i = 0; i < logCount; i++) {
+                int idx = (actionLogIndex - 1 - i + ACTION_LOG_SIZE) % ACTION_LOG_SIZE;
+                client.print("<tr><td style='padding:8px'>");
+                if (actionLog[idx].hour < 10) client.print("0");
+                client.print(actionLog[idx].hour);
+                client.print(":");
+                if (actionLog[idx].minute < 10) client.print("0");
+                client.print(actionLog[idx].minute);
+                client.print("</td><td style='padding:8px'>");
+                if (actionLog[idx].system == 'H') {
+                  client.print("<span class='badge badge-heating'>Heating</span>");
+                } else {
+                  client.print("<span class='badge badge-cooling'>Water</span>");
+                }
+                client.print("</td><td style='padding:8px'>");
+                if (actionLog[idx].direction == 'U') {
+                  client.print("<span style='color:#4CAF50'>&#9650; UP</span>");
+                } else {
+                  client.print("<span style='color:#f44336'>&#9660; DOWN</span>");
+                }
+                client.print("</td><td style='padding:8px'>");
+                client.print(actionLog[idx].reason);
+                client.print("</td></tr>");
+              }
+            }
             client.print("</table></div>");
 
             client.print("<div class='section' style='text-align:center'>");
