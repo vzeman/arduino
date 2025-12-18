@@ -18,7 +18,7 @@ void (*resetFunc)(void) = 0;
 #define ONE_WIRE_BUS_Water_Top 6     //modra kratka
 #define ONE_WIRE_BUS_Water_Bottom 7  //modra dlha
 #define ONE_WIRE_BUS_Heating_In 8    //zltozelena paska dlha
-#define ONE_WIRE_BUS_Heating_Out 9   //zltozelena paska kratka
+#define ONE_WIRE_BUS_Heating_Out 9   //zltozelena paska kratka - RESTORED to pin 9
 
 OneWire oneWireWaterTop(ONE_WIRE_BUS_Water_Top);
 OneWire oneWireWaterBottom(ONE_WIRE_BUS_Water_Bottom);
@@ -61,8 +61,9 @@ const int pin_step_motor_water_down = 11;    // Define SSR channel 2 pin
 const int pin_step_motor_heating_up = 12;    // Define SSR channel 3 pin
 const int pin_step_motor_heating_down = 13;  // Define SSR channel 4 pin
 
-//************ SOLID STATE RELAYS - CERPADLO ***********
-//TODO const int pin_water_pump = 9;
+//************ SOLID STATE RELAYS - WATER PUMP ***********
+// TODO: Move pump to different pin - pin 9 is needed for heating output sensor
+// const int pin_water_pump = 9;  // COMMENTED OUT - conflicts with sensor
 
 const int ZAP = LOW;   //relatka maju opacne spinanie, preto ZAP je low voltage
 const int VYP = HIGH;  //relatka maju opacne spinanie, preto VYP je high voltage
@@ -80,6 +81,10 @@ float Tin;
 float Tout;
 float TwaterTop;
 float TwaterBottom;
+
+// Sensor error flags - when true, stop making control changes
+boolean sensorErrorHeating = false;
+boolean sensorErrorWater = false;
 int TrequiredOUT = ThomeRequired + 3;  //inicializacia vystupnej teploty podlahovky
 int tempWaterRequiredHigh = 57;        //pozadovana horna teplota vody
 int tempWaterRequiredDown = 40;        //pozadovana dolna teplota vody
@@ -88,6 +93,29 @@ int tempWaterRequiredDown = 40;        //pozadovana dolna teplota vody
 const int stepUp = 500;     //cas v milisekundach kolko posuvame krokove motory smerom hore
 const int stepDown = 1000;  //cas v milisekundach kolko posuvame krokove motory smerom dolu - dolu chladime rychlejsie ako hore
 
+/* PUMP FUNCTIONALITY COMMENTED OUT - Need to move to different pin
+//********** WATER PUMP CONTROL ***********
+// Schedule windows (hours)
+int pumpMorningStart = 5;    // Morning window start (5:00)
+int pumpMorningEnd = 8;      // Morning window end (8:00)
+int pumpEveningStart = 18;   // Evening window start (18:00)
+int pumpEveningEnd = 22;     // Evening window end (22:00)
+
+// Pump cycle timing (in seconds)
+int pumpScheduledOnTime = 300;   // 5 minutes ON during scheduled windows
+int pumpScheduledOffTime = 1200; // 20 minutes cycle (so OFF = 20-5 = 15 min between ON periods)
+int pumpTempOnTime = 300;        // 5 minutes ON when triggered by temperature diff
+int pumpTempOffTime = 600;       // 10 minutes wait before next temp-triggered cycle
+
+// Temperature difference threshold
+int pumpTempDiffThreshold = 10;  // Trigger pump if top-bottom diff > 10°C
+
+// Pump state tracking
+boolean pumpIsOn = false;
+unsigned long pumpStateChangeTime = 0;  // When pump last changed state (in currentTime units)
+boolean pumpTriggeredByTemp = false;    // Was current cycle triggered by temperature?
+boolean pumpManualMode = false;         // Was pump started manually?
+END PUMP VARIABLES */
 
 //********** TIME control ******************
 int currentTime = 0;
@@ -109,6 +137,7 @@ float chartHistoryTin[CHART_HISTORY_SIZE];
 float chartHistoryTout[CHART_HISTORY_SIZE];
 float chartHistoryTwaterTop[CHART_HISTORY_SIZE];
 float chartHistoryTwaterBottom[CHART_HISTORY_SIZE];
+byte chartHistoryPump[CHART_HISTORY_SIZE];  // 0=OFF, 1=ON (scheduled), 2=ON (temp triggered)
 int chartHistoryIndex = 0;
 boolean chartHistoryInitialized = false;
 unsigned long lastChartUpdate = 0;
@@ -203,6 +232,89 @@ void tempWaterUp(void) {
 void tempWaterDown() {
   move(stepDown, pin_step_motor_water_down);
 }
+
+/* PUMP FUNCTIONS COMMENTED OUT - Need to move to different pin
+void pumpOn(boolean triggeredByTemp) {
+  if (!pumpIsOn) {
+    digitalWrite(pin_water_pump, ZAP);
+    pumpIsOn = true;
+    pumpTriggeredByTemp = triggeredByTemp;
+    pumpManualMode = false;
+    pumpStateChangeTime = currentTime;
+    if (triggeredByTemp) {
+      logAction('P', 'U', "Temp diff > thresh");
+    } else {
+      logAction('P', 'U', "Scheduled");
+    }
+    Serial.println("PUMP ON");
+  }
+}
+
+void pumpOff() {
+  if (pumpIsOn) {
+    digitalWrite(pin_water_pump, VYP);
+    pumpIsOn = false;
+    pumpStateChangeTime = currentTime;
+    logAction('P', 'D', "Cycle complete");
+    Serial.println("PUMP OFF");
+  }
+}
+
+boolean isInPumpScheduleWindow() {
+  int h = hour();
+  return (h >= pumpMorningStart && h < pumpMorningEnd) ||
+         (h >= pumpEveningStart && h < pumpEveningEnd);
+}
+
+void controlWaterPump() {
+  unsigned long timeSinceChange = currentTime - pumpStateChangeTime;
+  float tempDiff = TwaterTop - TwaterBottom;
+
+  Serial.print("Pump state: ");
+  Serial.print(pumpIsOn ? "ON" : "OFF");
+  Serial.print(", Time since change: ");
+  Serial.print(timeSinceChange);
+  Serial.print("s, Temp diff: ");
+  Serial.println(tempDiff);
+
+  if (pumpIsOn) {
+    // Check if we should turn OFF
+    int onDuration = pumpTriggeredByTemp ? pumpTempOnTime : pumpScheduledOnTime;
+    if (timeSinceChange >= onDuration) {
+      pumpOff();
+    }
+  } else {
+    // Check if we should turn ON
+
+    // Priority 1: Temperature difference trigger (works anytime)
+    // Skip temperature-based triggering if water sensors are faulty
+    if (!sensorErrorWater && tempDiff > pumpTempDiffThreshold) {
+      int offDuration = pumpTriggeredByTemp ? pumpTempOffTime : pumpScheduledOffTime;
+      if (timeSinceChange >= offDuration || pumpStateChangeTime == 0) {
+        Serial.println("Pump triggered by temperature difference");
+        pumpOn(true);
+        return;
+      }
+    }
+
+    // Priority 2: Scheduled window (still works even with sensor errors)
+    if (isInPumpScheduleWindow()) {
+      // Calculate position within cycle
+      int cycleTime = pumpScheduledOnTime + pumpScheduledOffTime;
+      int positionInCycle = currentTime % cycleTime;
+
+      // Turn on at start of each cycle within schedule window
+      if (positionInCycle < pumpScheduledOnTime) {
+        // We should be ON during this part of cycle
+        if (timeSinceChange >= pumpScheduledOffTime || pumpStateChangeTime == 0) {
+          Serial.println("Pump triggered by schedule");
+          pumpOn(false);
+        }
+      }
+    }
+  }
+}
+END PUMP FUNCTIONS */
 
 void switchOffStepMotors(void) {
   digitalWrite(pin_step_motor_water_up, VYP);      // Set SSR channel 1 pin LOW to disable output
@@ -385,6 +497,23 @@ void printTemperatureTimeline(WiFiClient& client) {
     client.print("'/>");
   }
 
+  // Draw pump state bars at bottom of chart
+  for (int i = 0; i < CHART_HISTORY_SIZE; i++) {
+    int dataIdx = (chartHistoryIndex + i) % CHART_HISTORY_SIZE;
+    if (chartHistoryPump[dataIdx] > 0) {
+      float x = 45 + (i * 340.0 / (CHART_HISTORY_SIZE - 1));
+      float barWidth = 340.0 / CHART_HISTORY_SIZE;
+      const char* pumpColor = (chartHistoryPump[dataIdx] == 2) ? "#e91e63" : "#00bcd4";  // Pink=temp, Cyan=scheduled
+      client.print("<rect x='");
+      client.print(x - barWidth/2);
+      client.print("' y='175' width='");
+      client.print(barWidth);
+      client.print("' height='8' fill='");
+      client.print(pumpColor);
+      client.print("' opacity='0.7'/>");
+    }
+  }
+
   // Draw action markers
   int logCount = actionLogFull ? ACTION_LOG_SIZE : actionLogIndex;
   for (int i = 0; i < logCount; i++) {
@@ -393,7 +522,10 @@ void printTemperatureTimeline(WiFiClient& client) {
     if (timeSinceAction < CHART_HISTORY_SIZE * CHART_UPDATE_INTERVAL && timeSinceAction >= 0) {
       float x = 390 - (timeSinceAction * 340.0 / (CHART_HISTORY_SIZE * CHART_UPDATE_INTERVAL));
       if (x >= 45) {
-        const char* markerColor = (actionLog[i].system == 'H') ? "#ff9800" : "#2196F3";
+        const char* markerColor;
+        if (actionLog[i].system == 'H') markerColor = "#ff9800";
+        else if (actionLog[i].system == 'P') markerColor = "#00bcd4";
+        else markerColor = "#2196F3";
         const char* arrow = (actionLog[i].direction == 'U') ? "M-4,4 L0,-4 L4,4" : "M-4,-4 L0,4 L4,-4";
         client.print("<g transform='translate(");
         client.print(x);
@@ -412,7 +544,8 @@ void printTemperatureTimeline(WiFiClient& client) {
   client.print("<text x='130' y='195' fill='#4CAF50' font-size='9'>H-Out</text>");
   client.print("<text x='175' y='195' fill='#2196F3' font-size='9'>W-Top</text>");
   client.print("<text x='220' y='195' fill='#9C27B0' font-size='9'>W-Bot</text>");
-  client.print("<text x='280' y='195' fill='#888' font-size='9'>&#9650;&#9660; = motor actions</text>");
+  client.print("<text x='265' y='195' fill='#00bcd4' font-size='9'>Pump</text>");
+  client.print("<text x='300' y='195' fill='#e91e63' font-size='9'>P-Temp</text>");
 
   client.print("</svg>");
 }
@@ -518,6 +651,7 @@ void setup(void) {
     chartHistoryTout[i] = 0;
     chartHistoryTwaterTop[i] = 0;
     chartHistoryTwaterBottom[i] = 0;
+    chartHistoryPump[i] = 0;
   }
 
   TrequiredOUT = initFromEEPROM(ADDRESS_TrequiredOUT, ThomeRequired + 3, 10,
@@ -540,7 +674,9 @@ void setup(void) {
   pinMode(pin_step_motor_water_down, OUTPUT);    // Define SSR channel 2 pin as output
   pinMode(pin_step_motor_heating_up, OUTPUT);    // Define SSR channel 3 pin as output
   pinMode(pin_step_motor_heating_down, OUTPUT);  // Define SSR channel 4 pin as output
+  // pinMode(pin_water_pump, OUTPUT);               // Water pump relay - COMMENTED OUT
   switchOffStepMotors();
+  // digitalWrite(pin_water_pump, VYP);             // Ensure pump is OFF at startup - COMMENTED OUT
 
 
   // Create open network. Change this line if you want to create an WEP network:
@@ -585,6 +721,12 @@ void loop(void) {
   Tout = sensorHeatingOut.getTempCByIndex(0);
   TwaterTop = sensorWaterTop.getTempCByIndex(0);
   TwaterBottom = sensorWaterBottom.getTempCByIndex(0);
+
+  // Detect sensor errors BEFORE any control logic runs
+  // Sensors return -127 when disconnected/error
+  sensorErrorHeating = (Tin < -50 || Tout < -50);
+  sensorErrorWater = (TwaterBottom < -50 || TwaterTop < -50);
+
   Serial.println("- HOME ---------------------");
   Serial.println(Thome);
   Serial.println("- HEATING ---------------------");
@@ -592,9 +734,13 @@ void loop(void) {
   Serial.println(Tin);
   Serial.print("O: ");
   Serial.println(Tout);
+  if (sensorErrorHeating) {
+    Serial.println("*** HEATING SENSOR ERROR DETECTED ***");
+  }
 
-
-  if (isSafetyTemperature(Tin, Tout)) {
+  if (sensorErrorHeating) {
+    Serial.println("HEATING CONTROL DISABLED - sensor error detected");
+  } else if (isSafetyTemperature(Tin, Tout)) {
     //safety temperature reached, cool down
     Serial.println("Cooling heating - safety");
     tempDown();
@@ -705,17 +851,14 @@ void loop(void) {
   Serial.println(TwaterBottom);
 
 
-  //fix errors in sensor data - This is critical error !!!
-  if (TwaterBottom < 0 && TwaterTop > 0) {
-    Serial.print("CRITICAL ERROR: Bottom Water Temperature sensor indicates negative value!!!");
-    TwaterBottom = TwaterTop - (tempWaterRequiredHigh - tempWaterRequiredDown);
-  }
-  if (TwaterTop < 0 && TwaterBottom > 0) {
-    Serial.print("CRITICAL ERROR: Top Water Temperature sensor indicates negative value!!!");
-    TwaterTop = TwaterBottom + (tempWaterRequiredHigh - tempWaterRequiredDown);
+  // Print water sensor error if detected
+  if (sensorErrorWater) {
+    Serial.println("*** WATER SENSOR ERROR DETECTED ***");
   }
 
-  if (currentTime % delayBetweenWaterChanges == 0) {
+  if (sensorErrorWater) {
+    Serial.println("WATER CONTROL DISABLED - sensor error detected");
+  } else if (currentTime % delayBetweenWaterChanges == 0) {
     // Water temperature control - prioritize top temperature (what user draws from)
     // Use hysteresis: only act when outside deadband to prevent oscillation
     const float waterDeadband = 2.0;  // Don't adjust if within 2°C of target
@@ -759,6 +902,9 @@ void loop(void) {
     Serial.println(currentTime % delayBetweenWaterChanges);
   }
 
+  // Water pump control - COMMENTED OUT
+  // Serial.println("- PUMP ---------------------");
+  // controlWaterPump();
 
   Serial.println("********************************");
   Serial.println("");
@@ -770,6 +916,8 @@ void loop(void) {
     chartHistoryTout[chartHistoryIndex] = Tout;
     chartHistoryTwaterTop[chartHistoryIndex] = TwaterTop;
     chartHistoryTwaterBottom[chartHistoryIndex] = TwaterBottom;
+    // Store pump state: 0=OFF, 1=ON (scheduled), 2=ON (temp triggered) - COMMENTED OUT
+    // chartHistoryPump[chartHistoryIndex] = pumpIsOn ? (pumpTriggeredByTemp ? 2 : 1) : 0;
     chartHistoryIndex = (chartHistoryIndex + 1) % CHART_HISTORY_SIZE;
     if (chartHistoryIndex == 0) {
       chartHistoryInitialized = true;
@@ -864,26 +1012,93 @@ void loop(void) {
             client.print(currentTime);
             client.print("</div></div>");
 
+            // Show sensor error warnings at top of page
+            if (sensorErrorHeating) {
+              client.print("<div style='background:#f44336;color:#fff;padding:12px;margin:8px;border-radius:8px;font-weight:600'>");
+              client.print("&#9888; HEATING SENSOR ERROR - Control disabled! Check sensor connections.");
+              client.print("</div>");
+            }
+            if (sensorErrorWater) {
+              client.print("<div style='background:#f44336;color:#fff;padding:12px;margin:8px;border-radius:8px;font-weight:600'>");
+              client.print("&#9888; WATER SENSOR ERROR - Control disabled! Check sensor connections.");
+              client.print("</div>");
+            }
+
             client.print("<div class='section'><a class='refresh-btn' href='/'>Refresh</a>");
             client.print("<h2>&#127968; Home Temperature</h2><table>");
-            printStatusValue(client, "Current", Thome, chartHistoryThome, true);
+            printStatusValue(client, "Current (pin A0)", Thome, chartHistoryThome, true);
             printControlValue(client, "Target", ThomeRequired, "HomeReq", chartHistoryThome, false);
             client.print("</table></div>");
 
             client.print("<div class='section'><h2>&#128293; Heating System</h2><table>");
-            printStatusValue(client, "Input Temperature", Tin, chartHistoryTin, true);
+            printStatusValue(client, "Input Temperature (pin 8)", Tin, chartHistoryTin, true);
             printControlValue(client, "Max Input", TmaxIN, "HeatingMaxIn", chartHistoryTin, false);
-            printStatusValue(client, "Output Temperature", Tout, chartHistoryTout, true);
+            printStatusValue(client, "Output Temperature (pin 9)", Tout, chartHistoryTout, true);
             printControlValue(client, "Target Output", TrequiredOUT, "HeatingReqOut", chartHistoryTout, false);
             printControlValue(client, "Max Output", TmaxOUT, "HeatingMaxOut", chartHistoryTout, false);
             client.print("</table></div>");
 
             client.print("<div class='section'><h2>&#128167; Water Heater</h2><table>");
-            printStatusValue(client, "Top Temperature", TwaterTop, chartHistoryTwaterTop, true);
+            printStatusValue(client, "Top Temperature (pin 6)", TwaterTop, chartHistoryTwaterTop, true);
             printControlValue(client, "Target Top", tempWaterRequiredHigh, "WaterReqTop", chartHistoryTwaterTop, false);
-            printStatusValue(client, "Bottom Temperature", TwaterBottom, chartHistoryTwaterBottom, true);
+            printStatusValue(client, "Bottom Temperature (pin 7)", TwaterBottom, chartHistoryTwaterBottom, true);
             printControlValue(client, "Target Bottom", tempWaterRequiredDown, "WaterReqBottom", chartHistoryTwaterBottom, false);
             client.print("</table></div>");
+
+            /* PUMP UI SECTION COMMENTED OUT - Need to move to different pin
+            // Water Pump section
+            client.print("<div class='section'><h2>&#128260; Water Pump</h2><table>");
+
+            // Current status with manual control
+            client.print("<tr><td class='label'>Status</td><td class='value'>");
+            if (pumpIsOn) {
+              client.print("<span class='badge' style='background:#4CAF50;color:#fff'>ON</span>");
+              if (pumpManualMode) {
+                client.print(" (manual)");
+              } else if (pumpTriggeredByTemp) {
+                client.print(" (temp triggered)");
+              } else {
+                client.print(" (scheduled)");
+              }
+              client.print(" <button onclick=\"location.href='/PumpOff'\" style='background:#f44336;margin-left:8px'>Stop</button>");
+            } else {
+              client.print("<span class='badge' style='background:#9e9e9e;color:#fff'>OFF</span>");
+              client.print(" <button onclick=\"location.href='/PumpOn'\" style='background:#4CAF50;margin-left:8px'>Start 5min</button>");
+            }
+            client.print("</td></tr>");
+
+            // Temperature difference
+            float tempDiff = TwaterTop - TwaterBottom;
+            client.print("<tr><td class='label'>Temp Difference</td><td class='value'>");
+            client.print(tempDiff, 1);
+            client.print("&#176;C");
+            if (tempDiff > pumpTempDiffThreshold) {
+              client.print("<span class='badge' style='background:#e91e63;color:#fff'>Trigger!</span>");
+            }
+            client.print("</td></tr>");
+
+            // Schedule info
+            client.print("<tr><td class='label'>Schedule</td><td class='value'>");
+            client.print(pumpMorningStart);
+            client.print(":00-");
+            client.print(pumpMorningEnd);
+            client.print(":00, ");
+            client.print(pumpEveningStart);
+            client.print(":00-");
+            client.print(pumpEveningEnd);
+            client.print(":00");
+            if (isInPumpScheduleWindow()) {
+              client.print("<span class='badge badge-stable'>Active</span>");
+            }
+            client.print("</td></tr>");
+
+            // Configurable settings
+            printControlValue(client, "Temp Threshold", pumpTempDiffThreshold, "PumpThresh", chartHistoryTwaterTop, false);
+            printControlValue(client, "ON Time (sec)", pumpScheduledOnTime, "PumpOnTime", chartHistoryTwaterTop, false);
+            printControlValue(client, "Cycle Time (sec)", pumpScheduledOffTime, "PumpCycleTime", chartHistoryTwaterTop, false);
+
+            client.print("</table></div>");
+            END PUMP UI SECTION */
 
             // System Analytics
             client.print("<div class='section'><h2>&#128200; System Analytics</h2><table>");
@@ -988,14 +1203,16 @@ void loop(void) {
                 client.print("</td><td style='padding:8px'>");
                 if (actionLog[idx].system == 'H') {
                   client.print("<span class='badge badge-heating'>Heating</span>");
+                } else if (actionLog[idx].system == 'P') {
+                  client.print("<span class='badge' style='background:#00bcd4;color:#fff'>Pump</span>");
                 } else {
                   client.print("<span class='badge badge-cooling'>Water</span>");
                 }
                 client.print("</td><td style='padding:8px'>");
                 if (actionLog[idx].direction == 'U') {
-                  client.print("<span style='color:#4CAF50'>&#9650; UP</span>");
+                  client.print("<span style='color:#4CAF50'>&#9650; ON</span>");
                 } else {
-                  client.print("<span style='color:#f44336'>&#9660; DOWN</span>");
+                  client.print("<span style='color:#f44336'>&#9660; OFF</span>");
                 }
                 client.print("</td><td style='padding:8px'>");
                 client.print(actionLog[idx].reason);
@@ -1062,6 +1279,49 @@ void loop(void) {
         } else if (currentLine.endsWith("GET /WaterReqBottom/DOWN")) {
           tempWaterRequiredDown -= 1;
           storeValuesToEEPROM();
+
+        /* PUMP URL HANDLERS COMMENTED OUT - Need to move to different pin
+        } else if (currentLine.endsWith("GET /PumpThresh/UP")) {
+          pumpTempDiffThreshold += 1;
+        } else if (currentLine.endsWith("GET /PumpThresh/DOWN")) {
+          if (pumpTempDiffThreshold > 1) pumpTempDiffThreshold -= 1;
+
+        } else if (currentLine.endsWith("GET /PumpOnTime/UP")) {
+          pumpScheduledOnTime += 60;  // Increase by 1 minute
+          pumpTempOnTime += 60;
+        } else if (currentLine.endsWith("GET /PumpOnTime/DOWN")) {
+          if (pumpScheduledOnTime > 60) {
+            pumpScheduledOnTime -= 60;  // Decrease by 1 minute
+            pumpTempOnTime -= 60;
+          }
+
+        } else if (currentLine.endsWith("GET /PumpCycleTime/UP")) {
+          pumpScheduledOffTime += 60;  // Increase by 1 minute
+        } else if (currentLine.endsWith("GET /PumpCycleTime/DOWN")) {
+          if (pumpScheduledOffTime > 60) pumpScheduledOffTime -= 60;  // Decrease by 1 minute
+
+        } else if (currentLine.endsWith("GET /PumpOn")) {
+          // Manual pump start for 5 minutes
+          if (!pumpIsOn) {
+            digitalWrite(pin_water_pump, ZAP);
+            pumpIsOn = true;
+            pumpTriggeredByTemp = false;
+            pumpManualMode = true;
+            pumpStateChangeTime = currentTime;
+            logAction('P', 'U', "Manual start");
+            Serial.println("PUMP ON - Manual");
+          }
+        } else if (currentLine.endsWith("GET /PumpOff")) {
+          // Manual pump stop
+          if (pumpIsOn) {
+            digitalWrite(pin_water_pump, VYP);
+            pumpIsOn = false;
+            pumpStateChangeTime = currentTime;
+            logAction('P', 'D', "Manual stop");
+            Serial.println("PUMP OFF - Manual");
+          }
+        END PUMP URL HANDLERS */
+
         } else if (currentLine.endsWith("GET /reboot")) {
           Serial.println("rebooting...");
           storeValuesToEEPROM();
